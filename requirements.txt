@@ -1,0 +1,4 @@
+pillow
+lxml
+python-docx
+pyinstaller
