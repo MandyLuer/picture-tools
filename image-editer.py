@@ -6,18 +6,20 @@ from PIL import Image, ImageTk
 import imghdr
 from docx import Document
 import re
+import xml.etree.ElementTree as ET
 
 
 class ZoomableImage(ttk.Frame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.image = None
+        self.original_image = None  # 保存原始图像
         self.photo_image = None
         self.canvas = tk.Canvas(self, bg='white', highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
         # 初始化缩放参数
-        self.scale = 1.0
+        self.scale = 0.7
         self.max_scale = 4.0
         self.min_scale = 0.1
 
@@ -26,6 +28,18 @@ class ZoomableImage(ttk.Frame):
         self.y = 0
         self.last_x = 0
         self.last_y = 0
+
+        # 初始化旋转角度
+        self.rotation_angle = 0
+
+        # 裁剪相关参数
+        self.crop_rect = None
+        self.crop_start_x = None
+        self.crop_start_y = None
+        self.crop_end_x = None
+        self.crop_end_y = None
+        self.crop_rectangle_id = None
+        self.cropping_mode = False
 
         # 绑定事件
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
@@ -37,6 +51,7 @@ class ZoomableImage(ttk.Frame):
         try:
             if image_path and os.path.exists(image_path):
                 self.image = Image.open(image_path)
+                self.original_image = self.image.copy()  # 保存原始图像
                 self.reset_view()
                 self.update_image()
                 return True
@@ -162,6 +177,282 @@ class ZoomableImage(ttk.Frame):
     def on_canvas_resize(self, event):
         self._apply_transform()
 
+    def start_cropping(self):
+        """开始裁剪模式"""
+        if not self.image:
+            return
+            
+        self.cropping_mode = True
+        self.canvas.bind("<ButtonPress-1>", self.on_crop_start)
+        self.canvas.bind("<B1-Motion>", self.on_crop_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_crop_end)
+        self.canvas.config(cursor="crosshair")
+
+    def on_crop_start(self, event):
+        """裁剪开始"""
+        if not self.cropping_mode:
+            return
+            
+        self.crop_start_x = event.x
+        self.crop_start_y = event.y
+        
+        # 删除之前的裁剪矩形
+        if self.crop_rectangle_id:
+            self.canvas.delete(self.crop_rectangle_id)
+
+    def on_crop_drag(self, event):
+        """裁剪拖拽"""
+        if not self.cropping_mode or self.crop_start_x is None:
+            return
+            
+        self.crop_end_x = event.x
+        self.crop_end_y = event.y
+        
+        # 删除之前的裁剪矩形
+        if self.crop_rectangle_id:
+            self.canvas.delete(self.crop_rectangle_id)
+            
+        # 绘制裁剪矩形
+        self.crop_rectangle_id = self.canvas.create_rectangle(
+            self.crop_start_x, self.crop_start_y,
+            self.crop_end_x, self.crop_end_y,
+            outline="red", width=2
+        )
+
+    def on_crop_end(self, event):
+        """裁剪结束"""
+        if not self.cropping_mode or self.crop_start_x is None:
+            return
+            
+        self.crop_end_x = event.x
+        self.crop_end_y = event.y
+        
+        self.cropping_mode = False
+        self.canvas.config(cursor="")
+        self.canvas.unbind("<ButtonPress-1>")
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        
+        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
+        self.canvas.bind("<ButtonPress-1>", self.on_button_press)
+        self.canvas.bind("<B1-Motion>", self.on_move_press)
+
+    def save_cropped_image(self):
+        """保存裁剪后的图片"""
+        if not hasattr(self, 'current_image_path') or not self.current_image_path:
+            return
+            
+        # 获取当前文件名和路径信息
+        folder_path = os.path.dirname(self.current_image_path)
+        current_filename = os.path.basename(self.current_image_path)
+        name, ext = os.path.splitext(current_filename)
+        
+        # 检查是否已经包含了裁剪后缀，如果是则不重复添加
+        if "_cropped" in name:
+            base_name = name.split("_cropped")[0]
+        else:
+            base_name = name
+            
+        # 生成新的文件名，避免覆盖原文件
+        new_filename = f"{base_name}_cropped{ext}"
+        counter = 1
+        new_filepath = os.path.join(folder_path, new_filename)
+        
+        # 如果文件已存在，则添加数字后缀
+        while os.path.exists(new_filepath):
+            new_filename = f"{base_name}_cropped_{counter}{ext}"
+            new_filepath = os.path.join(folder_path, new_filename)
+            counter += 1
+        
+        # 保存裁剪后的图片
+        try:
+            # 根据扩展名选择保存格式
+            if ext.lower() in ['.jpg', '.jpeg']:
+                rgb_image = self.image.convert('RGB')
+                rgb_image.save(new_filepath, 'JPEG', quality=95)
+            else:
+                self.image.save(new_filepath)
+                
+            # 更新当前图片路径
+            self.current_image_path = new_filepath
+            
+            # 更新主窗口中的文件名显示
+            try:
+                main_window = self.master.master.master.master
+                if hasattr(main_window, 'name_var'):
+                    name_part, _ = os.path.splitext(new_filename)
+                    # 使用最新的文件名更新显示
+                    main_window.name_var.set(name_part)
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"保存裁剪图片失败: {e}")
+
+    def crop_image(self):
+        """执行裁剪操作"""
+        if not self.image or self.crop_start_x is None or self.crop_end_x is None:
+            return
+            
+        # 转换画布坐标到图像坐标
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        img_width, img_height = self.image.size
+        scaled_width = int(img_width * self.scale)
+        scaled_height = int(img_height * self.scale)
+        
+        # 计算图像在画布上的位置
+        x_pos = canvas_width // 2 + self.x
+        y_pos = canvas_height // 2 + self.y
+        
+        # 计算裁剪区域在图像上的坐标
+        left_offset = (scaled_width - img_width) // 2
+        top_offset = (scaled_height - img_height) // 2
+        
+        # 转换为图像坐标
+        crop_left = int((self.crop_start_x - x_pos + scaled_width // 2) / self.scale)
+        crop_top = int((self.crop_start_y - y_pos + scaled_height // 2) / self.scale)
+        crop_right = int((self.crop_end_x - x_pos + scaled_width // 2) / self.scale)
+        crop_bottom = int((self.crop_end_y - y_pos + scaled_height // 2) / self.scale)
+        
+        # 确保坐标在有效范围内
+        crop_left = max(0, min(img_width, crop_left))
+        crop_right = max(0, min(img_width, crop_right))
+        crop_top = max(0, min(img_height, crop_top))
+        crop_bottom = max(0, min(img_height, crop_bottom))
+        
+        # 确保左上右下顺序正确
+        left, right = min(crop_left, crop_right), max(crop_left, crop_right)
+        top, bottom = min(crop_top, crop_bottom), max(crop_top, crop_bottom)
+        
+        # 如果裁剪区域太小则取消裁剪
+        if right - left < 10 or bottom - top < 10:
+            self.cancel_cropping()
+            return
+            
+        # 执行裁剪
+        cropped_image = self.image.crop((left, top, right, bottom))
+        self.image = cropped_image
+        self.original_image = self.image.copy()
+        self.rotation_angle = 0  # 重置旋转角度
+        
+        # 清除裁剪矩形
+        if self.crop_rectangle_id:
+            self.canvas.delete(self.crop_rectangle_id)
+        self.crop_rectangle_id = None
+        self.crop_start_x = None
+        self.crop_start_y = None
+        self.crop_end_x = None
+        self.crop_end_y = None
+        
+        # 保存裁剪后的图片
+        self.save_cropped_image()
+        
+        # 重新加载裁剪后的图片以替换原图
+        self.set_image(self.current_image_path)
+        
+        self.reset_view()
+        self.update_image()
+
+    def cancel_cropping(self):
+        """取消裁剪模式"""
+        self.cropping_mode = False
+        self.canvas.config(cursor="")
+        self.canvas.unbind("<ButtonPress-1>")
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        
+        # 重新绑定图片操作事件
+        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
+        self.canvas.bind("<ButtonPress-1>", self.on_button_press)
+        self.canvas.bind("<B1-Motion>", self.on_move_press)
+        
+        # 删除裁剪矩形
+        if self.crop_rectangle_id:
+            self.canvas.delete(self.crop_rectangle_id)
+        self.crop_rectangle_id = None
+        self.crop_start_x = None
+        self.crop_start_y = None
+        self.crop_end_x = None
+        self.crop_end_y = None
+        
+        # 重新显示图像
+        self._apply_transform()
+
+    def rotate_image(self, angle):
+        """旋转图片"""
+        if not self.image:
+            return
+            
+        self.rotation_angle = (self.rotation_angle + angle) % 360
+        self.image = self.original_image.rotate(self.rotation_angle, expand=True)
+        self.reset_view()
+        self.scale = 0.5  # 设置默认缩放为50%
+        self.update_image()
+
+    def flip_horizontal(self):
+        """水平翻转图片"""
+        if not self.image:
+            return
+            
+        self.image = self.image.transpose(Image.FLIP_LEFT_RIGHT)
+        # 更新original_image以保持翻转效果
+        self.original_image = self.image.copy()
+        self.rotation_angle = 0  # 重置旋转角度
+        self.reset_view()
+        self.scale = 0.5  # 设置默认缩放为50%
+        self.update_image()
+
+    def flip_vertical(self):
+        """垂直翻转图片"""
+        if not self.image:
+            return
+            
+        self.image = self.image.transpose(Image.FLIP_TOP_BOTTOM)
+        # 更新original_image以保持翻转效果
+        self.original_image = self.image.copy()
+        self.rotation_angle = 0  # 重置旋转角度
+        self.reset_view()
+        self.scale = 0.5  # 设置默认缩放为50%
+        self.update_image()
+
+    def compress_image(self, quality=85):
+        """压缩图片"""
+        if not self.image or not hasattr(self, 'current_image_path'):
+            return False
+            
+        try:
+            # 获取文件路径和扩展名
+            folder_path = os.path.dirname(self.current_image_path)
+            filename = os.path.basename(self.current_image_path)
+            name, ext = os.path.splitext(filename)
+            
+            # 创建压缩后的文件名
+            compressed_filename = f"{name}_compressed{ext}"
+            compressed_path = os.path.join(folder_path, compressed_filename)
+            
+            # 根据扩展名选择保存格式
+            if ext.lower() in ['.jpg', '.jpeg']:
+                rgb_image = self.image.convert('RGB')
+                rgb_image.save(compressed_path, 'JPEG', quality=quality, optimize=True)
+            elif ext.lower() == '.png':
+                self.image.save(compressed_path, 'PNG', optimize=True)
+            else:
+                self.image.save(compressed_path)
+                
+            return compressed_path
+        except Exception as e:
+            print(f"压缩图片失败: {e}")
+            return False
+
+    def reset_image(self):
+        """重置图片到原始状态"""
+        if self.original_image:
+            self.image = self.original_image.copy()
+            self.rotation_angle = 0
+            self.reset_view()
+            self.update_image()
+
 
 class WordImageExtractorApp:
     def __init__(self, root):
@@ -247,16 +538,12 @@ class WordImageExtractorApp:
         image_frame = ttk.LabelFrame(rename_tab, text="图片预览与重命名", padding="10")
         image_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        # 使用自定义的可缩放图片组件
-        self.zoomable_image = ZoomableImage(image_frame)
-        self.zoomable_image.pack(fill=tk.BOTH, expand=True)
-
-        # 文件名编辑区域
-        control_frame = ttk.Frame(image_frame)
-        control_frame.pack(fill=tk.X, pady=5)
+        # 文件名编辑区域 (放在图片上方)
+        top_control_frame = ttk.Frame(image_frame)
+        top_control_frame.pack(fill=tk.X, pady=5)
 
         # 文件名编辑
-        name_frame = ttk.Frame(control_frame)
+        name_frame = ttk.Frame(top_control_frame)
         name_frame.pack(side=tk.LEFT, padx=5)
 
         ttk.Label(name_frame, text="文件名:").pack(side=tk.LEFT)
@@ -269,21 +556,63 @@ class WordImageExtractorApp:
         self.ext_var = tk.StringVar()
         ttk.Label(name_frame, textvariable=self.ext_var).pack(side=tk.LEFT, padx=5)
 
-        # 缩放控制按钮
-        zoom_frame = ttk.Frame(control_frame)
-        zoom_frame.pack(side=tk.RIGHT, padx=5)
-
-        ttk.Button(zoom_frame, text="放大", command=lambda: self.zoomable_image.zoom(1.2)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(zoom_frame, text="缩小", command=lambda: self.zoomable_image.zoom(0.8)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(zoom_frame, text="重置", command=self.zoomable_image.reset_view).pack(side=tk.LEFT, padx=2)
-
         # 导航按钮
-        nav_frame = ttk.Frame(control_frame)
+        nav_frame = ttk.Frame(top_control_frame)
         nav_frame.pack(side=tk.RIGHT, padx=10)
 
         ttk.Button(nav_frame, text="上一张", command=self.previous_image).pack(side=tk.LEFT, padx=2)
         ttk.Button(nav_frame, text="下一张", command=self.next_image).pack(side=tk.LEFT, padx=2)
         ttk.Button(nav_frame, text="保存重命名", command=self.save_rename).pack(side=tk.LEFT, padx=2)
+        # # 重置按钮移至这里
+        # ttk.Button(nav_frame, text="重置", command=self.zoomable_image.reset_image).pack(side=tk.LEFT, padx=2)
+
+        # 使用自定义的可缩放图片组件
+        self.zoomable_image = ZoomableImage(image_frame)
+        self.zoomable_image.pack(fill=tk.BOTH, expand=True)
+
+        # 编辑功能按钮区域 (放在图片下方)
+        bottom_control_frame = ttk.Frame(image_frame)
+        bottom_control_frame.pack(fill=tk.X, pady=5)
+
+        # 第一行按钮: 旋转和翻转
+        row1_frame = ttk.Frame(bottom_control_frame)
+        row1_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row1_frame, text="旋转和翻转选项：").pack(side=tk.LEFT)
+
+        # 旋转按钮
+        ttk.Button(row1_frame, text="左转90°", command=lambda: self.zoomable_image.rotate_image(-90)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row1_frame, text="右转90°", command=lambda: self.zoomable_image.rotate_image(90)).pack(side=tk.LEFT, padx=2)
+        
+        # 翻转按钮
+        ttk.Button(row1_frame, text="水平翻转", command=self.zoomable_image.flip_horizontal).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row1_frame, text="垂直翻转", command=self.zoomable_image.flip_vertical).pack(side=tk.LEFT, padx=2)
+
+        # 第二行按钮: 裁剪、压缩等
+        row2_frame = ttk.Frame(bottom_control_frame)
+        row2_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row2_frame, text="裁剪和压缩选项：").pack(side=tk.LEFT)
+
+        # 裁剪按钮
+        ttk.Button(row2_frame, text="开始裁剪", command=self.zoomable_image.start_cropping).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2_frame, text="确认裁剪", command=self.zoomable_image.crop_image).pack(side=tk.LEFT, padx=2)
+        # 添加取消裁剪按钮
+        ttk.Button(row2_frame, text="取消裁剪", command=self.zoomable_image.cancel_cropping).pack(side=tk.LEFT, padx=2)
+        
+        # 压缩按钮
+        ttk.Button(row2_frame, text="压缩图片", command=self.compress_current_image).pack(side=tk.LEFT, padx=2)
+
+        # 重置视图
+        ttk.Button(row2_frame, text="重置视图", command=self.zoomable_image.reset_view).pack(side=tk.LEFT, padx=2)
+        
+        # 缩放控制按钮
+        zoom_frame = ttk.Frame(row2_frame)
+        zoom_frame.pack(side=tk.RIGHT, padx=5)
+
+        # ttk.Button(zoom_frame, text="放大", command=lambda: self.zoomable_image.zoom(1.2)).pack(side=tk.LEFT, padx=2)
+        # ttk.Button(zoom_frame, text="缩小", command=lambda: self.zoomable_image.zoom(0.8)).pack(side=tk.LEFT, padx=2)
+        # ttk.Button(zoom_frame, text="重置视图", command=self.zoomable_image.reset_view).pack(side=tk.LEFT, padx=2)
 
         # 初始状态显示提示
         self.zoomable_image.show_message("请选择图片文件夹并加载图片")
@@ -393,36 +722,91 @@ class WordImageExtractorApp:
     def get_image_order_from_docx(self, docx_path):
         """通过解析document.xml获取图片在文档中的实际顺序"""
         image_order = []
-
-        # 方法1：使用python-docx获取图片引用
-        try:
-            doc = Document(docx_path)
-            for rel in doc.part.rels.values():
-                if "image" in rel.target_ref:
-                    image_path = f"word/{rel.target_ref}"
-                    image_order.append(image_path)
-        except:
-            pass
-
-        # 方法2：直接解析document.xml（更准确）
+        
         try:
             with zipfile.ZipFile(docx_path) as z:
-                with z.open('word/document.xml') as f:
-                    xml_content = f.read().decode('utf-8')
+                # 读取document.xml.rels文件建立关系映射
+                with z.open('word/_rels/document.xml.rels') as rels_file:
+                    rels_content = rels_file.read()
+                    rels_root = ET.fromstring(rels_content)
+                    
+                # 建立ID到图片路径的映射
+                rel_mapping = {}
+                for rel in rels_root.findall('{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
+                    rel_id = rel.get('Id')
+                    target = rel.get('Target')
+                    if target and target.startswith('media/'):
+                        rel_mapping[rel_id] = f'word/{target}'
+                
+                # 解析document.xml查找图片引用
+                with z.open('word/document.xml') as doc_file:
+                    doc_content = doc_file.read()
+                    doc_root = ET.fromstring(doc_content)
+                
+                # 查找所有的图片引用
+                # namespace definitions
+                namespaces = {
+                    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+                    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+                    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+                }
+                
+                # 查找所有包含图片的drawing元素
+                drawings = doc_root.findall('.//w:drawing', namespaces)
+                for drawing in drawings:
+                    blips = drawing.findall('.//a:blip', namespaces)
+                    for blip in blips:
+                        embed = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                        if embed and embed in rel_mapping:
+                            image_path = rel_mapping[embed]
+                            if image_path not in image_order:
+                                image_order.append(image_path)
+                
+                # 同时查找旧式的图片引用(pict元素)
+                picts = doc_root.findall('.//w:pict', namespaces)
+                for pict in picts:
+                    embeddings = pict.findall('.//v:shape/v:imagedata', 
+                                            {'v': 'urn:schemas-microsoft-com:vml'})
+                    for embedding in embeddings:
+                        rel_id = embedding.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+                        if rel_id and rel_id in rel_mapping:
+                            image_path = rel_mapping[rel_id]
+                            if image_path not in image_order:
+                                image_order.append(image_path)
+                                
+        except Exception as e:
+            print(f"解析Word文档时出错: {e}")
+            # 回退到原来的实现方式
+            try:
+                with zipfile.ZipFile(docx_path) as z:
+                    with z.open('word/document.xml') as f:
+                        xml_content = f.read().decode('utf-8')
 
-            # 查找所有图片引用
-            image_refs = re.findall(r'<a:blip r:embed="([^"]+)"', xml_content)
-            for ref in image_refs:
-                image_path = f"word/{ref}"
-                image_order.append(image_path)
-        except:
-            pass
-
-        # 如果以上方法都失败，回退到按文件名排序
-        if not image_order:
-            with zipfile.ZipFile(docx_path) as z:
-                media_files = [f for f in z.namelist() if f.startswith('word/media/')]
-                image_order = sorted(media_files)
+                # 查找所有图片引用，按照在文档中出现的顺序
+                image_refs = re.findall(r'<w:drawing>.*?<a:blip r:embed="([^"]+)".*?</w:drawing>', xml_content, re.DOTALL)
+                if not image_refs:
+                    # 备用方法：查找所有blip标签
+                    image_refs = re.findall(r'<a:blip r:embed="([^"]+)"', xml_content)
+                    
+                # 读取rels文件建立映射
+                with z.open('word/_rels/document.xml.rels') as rels_file:
+                    rels_content = rels_file.read().decode('utf-8')
+                
+                for ref in image_refs:
+                    # 在rels文件中查找实际的图片文件名
+                    match = re.search(f'Id="{ref}"[^>]*Target="media/([^"]+)"', rels_content)
+                    if match:
+                        image_path = f"word/media/{match.group(1)}"
+                        image_order.append(image_path)
+            except Exception as e2:
+                print(f"备用解析方法也失败了: {e2}")
+                # 最后的回退方案：按文件名排序
+                with zipfile.ZipFile(docx_path) as z:
+                    media_files = [f for f in z.namelist() if f.startswith('word/media/')]
+                    # 按照文件名中的数字排序
+                    media_files.sort(key=lambda x: int(re.findall(r'\d+', os.path.basename(x))[0]) 
+                                    if re.findall(r'\d+', os.path.basename(x)) else 0)
+                    image_order = media_files
 
         return image_order
 
@@ -491,10 +875,17 @@ class WordImageExtractorApp:
             folder_path = self.image_folder_path.get()
             image_file = self.image_files[self.current_index]
             self.current_image_path = os.path.join(folder_path, image_file)
+            
+            # 设置当前图片路径到zoomable_image对象
+            self.zoomable_image.current_image_path = self.current_image_path
 
             # 尝试加载图片，如果失败则显示友好消息
             success = self.zoomable_image.set_image(self.current_image_path)
             if success:
+                # 设置默认缩放为50%
+                self.zoomable_image.scale = 0.5
+                self.zoomable_image.update_image()
+                
                 try:
                     # 更新文件名和扩展名显示
                     _, ext = os.path.splitext(image_file)
@@ -600,6 +991,21 @@ class WordImageExtractorApp:
             messagebox.showinfo("成功", "文件名已更新")
         except Exception as e:
             messagebox.showerror("错误", f"重命名失败: {str(e)}")
+
+    def compress_current_image(self):
+        """压缩当前图片"""
+        if not hasattr(self, 'current_image_path') or not self.current_image_path:
+            messagebox.showwarning("警告", "没有可压缩的图片")
+            return
+            
+        try:
+            compressed_path = self.zoomable_image.compress_image()
+            if compressed_path:
+                messagebox.showinfo("成功", f"图片已压缩并保存为:\n{os.path.basename(compressed_path)}")
+            else:
+                messagebox.showerror("错误", "图片压缩失败")
+        except Exception as e:
+            messagebox.showerror("错误", f"图片压缩失败: {str(e)}")
 
 
 if __name__ == "__main__":
