@@ -1,4 +1,2 @@
-pillow
-lxml
-python-docx
-pyinstaller
+# Default dependencies for the web backend.
+-r requirements/web.txt

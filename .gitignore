@@ -162,3 +162,8 @@ cython_debug/
 .DS_Store
 # Superpowers 隔离工作区
 .worktrees/
+
+# Vue frontend
+node_modules/
+frontend/dist/
+logs/
