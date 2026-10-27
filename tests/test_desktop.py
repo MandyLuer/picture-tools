@@ -20,12 +20,13 @@ def test_bridge_injection_exposes_only_folder_actions(monkeypatch):
 
     bridge = DesktopBridge(object())
     bridge._window = PrivateWindow()
-    assert [name for name in dir(bridge) if not name.startswith('_')] == ['export_folder', 'export_zip', 'import_folder']
+    expected = ['capture_certificate', 'choose_certificate', 'export_folder', 'export_zip', 'import_folder']
+    assert [name for name in dir(bridge) if not name.startswith('_')] == expected
     # Production uses an explicit method allowlist, never js_api=bridge.
     scripts = []
     window = SimpleNamespace(
         _js_api=None,
-        _functions={"import_folder": bridge.import_folder, "export_folder": bridge.export_folder, "export_zip": bridge.export_zip},
+        _functions={name: getattr(bridge, name) for name in expected},
         _expose_lock=threading.Lock(),
         events=SimpleNamespace(before_load=Mock(), _pywebviewready=threading.Event(), loaded=threading.Event()),
         run_js=scripts.append,
@@ -34,7 +35,7 @@ def test_bridge_injection_exposes_only_folder_actions(monkeypatch):
     inject_pywebview('edgechromium', window)
     assert window.events.loaded.wait(2), 'Bridge injection hung before the loaded event'
     assert window.events._pywebviewready.is_set()
-    assert sorted(f['func'] for f in json.loads(scripts[-1])) == ['export_folder', 'export_zip', 'import_folder']
+    assert sorted(f['func'] for f in json.loads(scripts[-1])) == expected
 
 
 @pytest.mark.parametrize('action', ['import_folder', 'export_folder', 'export_zip'])

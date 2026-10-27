@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 import mimetypes
+import logging
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse, JSONResponse
@@ -28,15 +29,18 @@ class Edit(BaseModel):
 def create_app(token=None):
     workspace = Workspace()
     lock = threading.RLock()
+    export_picker_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(app):
         yield
         workspace.close()
 
-    app = FastAPI(title="拾图 Shitu · Word 图片工作台", version="2.3.0", lifespan=lifespan)
+    app = FastAPI(title="拾图 Shitu · Word 图片工作台", version="2.6.0", lifespan=lifespan)
     app.state.workspace = workspace
     app.state.lock = lock
+    from .certificate_batch import register_certificate_routes
+    register_certificate_routes(app)
 
     @app.middleware("http")
     async def protect(request: Request, call_next):
@@ -59,6 +63,12 @@ def create_app(token=None):
     @app.exception_handler(OSError)
     async def file_error(request, exc):
         return JSONResponse({"detail": "文件暂时无法写入或删除，请稍后重试"}, status_code=409)
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request, exc):
+        logging.getLogger('shitu.api').error('Unhandled error for %s', request.url.path,
+                                            exc_info=(type(exc), exc, exc.__traceback__))
+        return JSONResponse({'detail': '服务端处理失败，请稍后重试；具体原因可查看后端日志'}, status_code=500)
 
     @app.get("/api/images")
     def listing():
@@ -116,6 +126,29 @@ def create_app(token=None):
     def export():
         with lock:
             return StreamingResponse(io.BytesIO(workspace.export_zip()), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="images.zip"'})
+
+    @app.post('/api/export/folder')
+    def export_to_system_folder(request: Request):
+        if not request.client or request.client.host not in ('127.0.0.1', '::1'):
+            raise HTTPException(403, '系统文件夹导出仅适用于本机访问，请使用 ZIP 压缩包')
+        if not export_picker_lock.acquire(blocking=False):
+            raise HTTPException(409, '已有文件夹导出正在进行，请先完成或取消系统选择框')
+        try:
+            with lock:
+                if not workspace.images:
+                    raise ValueError('工作区没有可导出的图片')
+                generation = workspace.root
+            from .folder_picker import choose_export_folder
+            target = choose_export_folder()
+            if not target:
+                return {'cancelled': True}
+            with lock:
+                if workspace.root != generation:
+                    raise ValueError('工作区已变化，请重新导出')
+                workspace.export_folder(target)
+                return {'count': len(workspace.images), 'folder': Path(target).name}
+        finally:
+            export_picker_lock.release()
 
     @app.delete("/api/images")
     def clear():

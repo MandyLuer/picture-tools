@@ -23,6 +23,54 @@ class DesktopBridge:
         # Keep server/window internals private and expose only explicit methods.
         self._app = app
         self._window = None
+        self._certificate = None
+        self._capture_lock = threading.Lock()
+
+    def choose_certificate(self):
+        if sys.platform != 'win32':
+            return {'error': '原生证书截图仅支持 Windows 桌面客户端'}
+        result = self._window.create_file_dialog(webview.FileDialog.OPEN, file_types=('Certificate (*.crt;*.cer;*.pem)',))
+        if not result:
+            return {'cancelled': True}
+        try:
+            from backend.certificates import read_certificate, MAX_CERTIFICATE
+            path = Path(result[0])
+            if path.stat().st_size > MAX_CERTIFICATE:
+                raise ValueError('证书文件不能超过 2 MB')
+            der, metadata = read_certificate(path.read_bytes(), path.name)
+            self._certificate = (der, metadata)
+            return {'certificate': metadata}
+        except Exception as exc:
+            return {'error': str(exc)}
+
+    def capture_certificate(self, kinds):
+        if not self._capture_lock.acquire(blocking=False):
+            return {'error': '已有证书截图任务正在运行'}
+        try:
+            if self._certificate is None:
+                raise ValueError('请先选择一张证书')
+            from backend.certificates import screenshot_certificate
+            der, metadata = self._certificate
+            with self._app.state.lock:
+                generation = self._app.state.workspace.root
+            pictures = screenshot_certificate(der, metadata, kinds)
+            with self._app.state.lock:
+                workspace = self._app.state.workspace
+                if workspace.root != generation:
+                    raise ValueError('工作区已变更，本次截图未导入，请重试')
+                added = []
+                try:
+                    for raw, name in pictures:
+                        added.append(workspace.add(raw, name))
+                    return {'count': len(added), 'images': workspace.listing(), 'selected': added[0]}
+                except Exception:
+                    for key in added:
+                        workspace.remove(key)
+                    raise
+        except Exception as exc:
+            return {'error': str(exc)}
+        finally:
+            self._capture_lock.release()
 
     def import_folder(self):
         result = self._window.create_file_dialog(webview.FileDialog.FOLDER)
@@ -97,6 +145,13 @@ def main():
     if context_test:
         test_document = Path(sys.argv[sys.argv.index("--test-document") + 1])
         app.state.workspace.extract(test_document.read_bytes(), test_document.name)
+    certificate_test = gui_test and '--test-certificate' in sys.argv
+    if certificate_test:
+        from backend.certificates import read_certificate, screenshot_certificate
+        cert_path = Path(sys.argv[sys.argv.index('--test-certificate') + 1])
+        der, metadata = read_certificate(cert_path.read_bytes(), cert_path.name)
+        for raw, name in screenshot_certificate(der, metadata, ['general','issuer','public_key','path']):
+            app.state.workspace.add(raw, name)
     list_test = gui_test and "--test-image-list" in sys.argv
     if list_test:
         import io
@@ -133,7 +188,8 @@ def main():
     compact_test = gui_test and '--compact-window' in sys.argv
     window = webview.create_window("拾图 Shitu · Word 图片工作台", f"http://127.0.0.1:{port}/?token={token}", width=800 if compact_test else 1440, height=650 if compact_test else 960, min_size=(800, 650))
     bridge._window = window
-    window.expose(bridge.import_folder, bridge.export_folder, bridge.export_zip)
+    window.expose(bridge.import_folder, bridge.export_folder, bridge.export_zip,
+                  bridge.choose_certificate, bridge.capture_certificate)
     loaded = threading.Event()
     test_success = threading.Event()
 
@@ -149,7 +205,10 @@ def main():
                     title: document.title,
                     uiReady: !!document.querySelector('.workspace-heading'),
                     bridge: Object.keys(window.pywebview.api).sort(),
-                    desktopReady: document.body.innerText.includes('桌面版'),
+                    desktopReady: document.querySelector('.badge')?.textContent.includes('桌面版'),
+                    menuCount: document.querySelectorAll('.feature-menu [role=tab]').length,
+                    sidebarImports: document.querySelectorAll('aside input[type=file]').length,
+                    certificateEntry: !!document.querySelector('[data-menu=certificate]'),
                     contextReady: !!document.querySelector('.document-context .name-candidates button'),
                     imageCount: document.images.length,
                     imagesReady: Array.from(document.images).filter(i => i.loading !== 'lazy').every(i => i.complete && i.naturalWidth > 0),
@@ -160,7 +219,9 @@ def main():
                     previewWidth: document.querySelector('.stage')?.clientWidth,
                     previewHeight: document.querySelector('.stage')?.clientHeight,
                     pageHeight: document.documentElement.scrollHeight,
-                    viewportHeight: innerHeight
+                    viewportHeight: innerHeight,
+                    pageWidth: document.documentElement.scrollWidth,
+                    viewportWidth: innerWidth
                     })""")
                     if (result and result['uiReady'] and result['desktopReady'] and result['imagesReady']
                             and (not context_test or result['contextReady'])
@@ -177,9 +238,13 @@ def main():
                                       and result['listOverflow'] == 'auto'
                                       and result['pageHeight'] <= result['viewportHeight'] + 1):
                     raise RuntimeError('Image list must scroll independently without growing the page')
+                if certificate_test and not (result['certificateEntry'] and result['listCount'] == 4):
+                    raise RuntimeError('Certificate screenshots did not reach the desktop image list')
                 if not (result and result["uiReady"] and result["desktopReady"] and result["imagesReady"]
                         and result["previewWidth"] > 0 and result["previewHeight"] > 0
-                        and result["bridge"] == ["export_folder", "export_zip", "import_folder"]):
+                        and result['menuCount'] == 3 and result['sidebarImports'] == 0
+                        and result['pageWidth'] <= result['viewportWidth'] + 1
+                        and result["bridge"] == ["capture_certificate", "choose_certificate", "export_folder", "export_zip", "import_folder"]):
                     raise RuntimeError("Desktop UI/bridge readiness check failed")
                 test_success.set()
             except Exception:
@@ -216,6 +281,15 @@ def main():
 
 
 if __name__ == "__main__":
+    if '--folder-picker' in sys.argv:
+        from backend.folder_picker import main as folder_picker
+        sys.exit(folder_picker(sys.argv[sys.argv.index('--folder-picker') + 1]))
+    if '--folder-picker' in sys.argv:
+        from backend.folder_picker import main as folder_picker
+        sys.exit(folder_picker(sys.argv[sys.argv.index('--folder-picker') + 1]))
+    if '--certificate-worker' in sys.argv:
+        from backend.certificate_worker import main as certificate_worker
+        sys.exit(certificate_worker(sys.argv[sys.argv.index('--certificate-worker') + 1]))
     try:
         main()
     except Exception:

@@ -167,3 +167,6 @@ cython_debug/
 node_modules/
 frontend/dist/
 logs/
+
+# Local input documents and certificates
+/data/

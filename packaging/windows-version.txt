@@ -1,6 +1,6 @@
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(2, 3, 0, 0), prodvers=(2, 3, 0, 0),
+        filevers=(2, 6, 0, 0), prodvers=(2, 6, 0, 0),
         mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1,
         subtype=0x0, date=(0, 0)
     ),
@@ -8,11 +8,11 @@ VSVersionInfo(
         StringFileInfo([
             StringTable('080404B0', [
                 StringStruct('FileDescription', '拾图 Shitu · Word 图片工作台'),
-                StringStruct('FileVersion', '2.3.0'),
+                StringStruct('FileVersion', '2.6.0'),
                 StringStruct('InternalName', 'Shitu'),
                 StringStruct('OriginalFilename', '拾图 Shitu.exe'),
                 StringStruct('ProductName', '拾图 Shitu'),
-                StringStruct('ProductVersion', '2.3.0')
+                StringStruct('ProductVersion', '2.6.0')
             ])
         ]),
         VarFileInfo([VarStruct('Translation', [2052, 1200])])

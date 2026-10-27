@@ -12,9 +12,9 @@ try {
         npm run build
         if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
     } finally { Pop-Location }
-    python -m PyInstaller --noconfirm --distpath dist/2.3.0 packaging/desktop.spec
+    python -m PyInstaller --noconfirm --distpath dist/2.6.0 packaging/desktop.spec
     if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed' }
-    $clientPath = Join-Path (Get-Location).Path 'dist/2.3.0/Shitu/拾图 Shitu.exe'
+    $clientPath = Join-Path (Get-Location).Path 'dist/2.6.0/Shitu/拾图 Shitu.exe'
     foreach ($compact in @($false, $true)) {
         $testArguments = @('--gui-smoke-test', '--test-image-list')
         if ($compact) { $testArguments += '--compact-window' }
@@ -25,5 +25,5 @@ try {
         }
         if ($clientTest.ExitCode -ne 0) { throw 'Packaged desktop GUI smoke test failed' }
     }
-    Compress-Archive -LiteralPath 'dist/2.3.0/Shitu' -DestinationPath 'dist/Shitu-2.3.0-Windows-x64.zip' -Force
+    Compress-Archive -LiteralPath 'dist/2.6.0/Shitu' -DestinationPath 'dist/Shitu-2.6.0-Windows-x64.zip' -Force
 } finally { Pop-Location }
