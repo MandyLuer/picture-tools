@@ -8,6 +8,7 @@ import uuid
 import zipfile
 import logging
 from copy import deepcopy
+from collections import OrderedDict
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -16,6 +17,7 @@ from .document_context import image_contexts
 
 MAX_FILE = 50 * 1024 * 1024
 MAX_TOTAL = 250 * 1024 * 1024
+MAX_PREVIEW_CACHE = 64 * 1024 * 1024
 EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "GIF": ".gif", "BMP": ".bmp", "TIFF": ".tiff", "WEBP": ".webp"}
 
 
@@ -34,8 +36,12 @@ class Workspace:
         self.root = Path(self.temp.name)
         self.images = {}
         self._retired = []
+        self._preview_cache = OrderedDict()
+        self._preview_bytes = 0
 
     def close(self):
+        self._preview_cache.clear()
+        self._preview_bytes = 0
         for temp in [self.temp, *self._retired]:
             try:
                 temp.cleanup()
@@ -48,6 +54,8 @@ class Workspace:
         fresh = tempfile.TemporaryDirectory(prefix="picture-tools-")
         retired = self.temp
         self.temp, self.root, self.images = fresh, Path(fresh.name), {}
+        self._preview_cache.clear()
+        self._preview_bytes = 0
         self._retired.append(retired)
         for temp in self._retired[:]:
             try:
@@ -61,13 +69,54 @@ class Workspace:
         item = self.get(key)
         item['path'].unlink(missing_ok=True)
         del self.images[key]
+        self.invalidate_preview(key)
+
+    def invalidate_preview(self, key):
+        for cache_key in list(self._preview_cache):
+            if cache_key[0] == key:
+                self._preview_bytes -= len(self._preview_cache.pop(cache_key))
+
+    def cached_preview(self, key, revision, thumbnail):
+        cache_key = (key, revision, thumbnail)
+        data = self._preview_cache.get(cache_key)
+        if data is not None:
+            self._preview_cache.move_to_end(cache_key)
+        return data
+
+    def cache_preview(self, key, revision, thumbnail, data):
+        if key not in self.images or self.images[key]['revision'] != revision or len(data) > MAX_PREVIEW_CACHE:
+            return
+        cache_key = (key, revision, thumbnail)
+        previous = self._preview_cache.pop(cache_key, b'')
+        self._preview_bytes -= len(previous)
+        while self._preview_cache and self._preview_bytes + len(data) > MAX_PREVIEW_CACHE:
+            _, retired = self._preview_cache.popitem(last=False)
+            self._preview_bytes -= len(retired)
+        self._preview_cache[cache_key] = data
+        self._preview_bytes += len(data)
+
+    @staticmethod
+    def render_preview(data, image_format, animated, thumbnail):
+        # Browser-native static PNG previews need no decoding or re-encoding.
+        if not thumbnail and image_format == 'PNG' and not animated:
+            return data
+        with Image.open(io.BytesIO(data)) as source:
+            if thumbnail:
+                source.thumbnail((96, 96))
+            rendered = source.convert('RGBA')
+            output = io.BytesIO()
+            rendered.save(output, 'PNG')
+            return output.getvalue()
 
     def add(self, data, name, contexts=None):
         if len(data) > MAX_FILE:
             raise ValueError("单个文件不能超过 50 MB")
         with Image.open(io.BytesIO(data)) as image:
+            width, height = image.size
+            animated = getattr(image, 'is_animated', False)
             image.verify()
             ext = EXTENSIONS.get(image.format)
+            image_format = image.format
         if not ext:
             raise ValueError("不支持的图片格式")
         if sum(p.stat().st_size for p in self.root.iterdir()) + len(data) > MAX_TOTAL:
@@ -81,7 +130,8 @@ class Workspace:
         key = uuid.uuid4().hex
         path = self.root / (key + ext)
         path.write_bytes(data)
-        self.images[key] = {"id": key, "name": filename, "path": path, "contexts": deepcopy(contexts or []), "revision": 0}
+        self.images[key] = {"id": key, "name": filename, "path": path, "contexts": deepcopy(contexts or []), "revision": 0,
+                            'width': width, 'height': height, 'size': len(data), 'format': image_format, 'animated': animated}
         return key
 
     def get(self, key):
@@ -90,15 +140,15 @@ class Workspace:
         return self.images[key]
 
     def listing(self):
-        result = []
-        for item in self.images.values():
-            with Image.open(item["path"]) as image:
-                result.append({"id": item["id"], "name": item["name"], "width": image.width, "height": image.height, "size": item["path"].stat().st_size, "contexts": item["contexts"], "revision": item["revision"]})
-        return result
+        fields = ('id', 'name', 'width', 'height', 'size', 'contexts', 'revision')
+        return [{**{field: item[field] for field in fields}, **({'has_source': True} if item.get('source') else {})} for item in self.images.values()]
 
     def extract(self, data, document_name="Word 文档"):
         if len(data) > MAX_FILE:
             raise ValueError("Word 文件不能超过 50 MB")
+        if Path(document_name).suffix.lower() == '.doc':
+            from .document_conversion import convert_doc
+            data = convert_doc(data)
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             if sum(i.file_size for i in archive.infolist()) > MAX_TOTAL:
                 raise ValueError("Word 解压后过大")
@@ -170,6 +220,8 @@ class Workspace:
         finally:
             pending.unlink(missing_ok=True)
         item['revision'] += 1
+        item.update(width=image.width, height=image.height, size=len(data), format=fmt, animated=False)
+        self.invalidate_preview(key)
         return key
 
     def export_zip(self):

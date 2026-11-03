@@ -63,7 +63,7 @@ def select_folder():
     pidl = None
     try:
         display = ctypes.create_unicode_buffer(32768)
-        info = BrowseInfo(None, None, ctypes.cast(display, wt.LPWSTR), '拾图 Shitu：请选择图片导出文件夹', 0x41, activate, 0, 0)
+        info = BrowseInfo(None, None, ctypes.cast(display, wt.LPWSTR), '拾图 Shitu：请选择图片文件夹', 0x41, activate, 0, 0)
         pidl = shell.SHBrowseForFolderW(ctypes.byref(info))
         if not pidl:
             return None

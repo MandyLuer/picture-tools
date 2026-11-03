@@ -81,7 +81,7 @@ class DesktopBridge:
             before = set(workspace.images)
             try:
                 for path in sorted(Path(result[0]).iterdir(), key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', p.name)]):
-                    if path.is_file():
+                    if path.is_file() and not path.is_symlink():
                         from PIL import Image
                         try:
                             with Image.open(path) as image:
@@ -90,7 +90,10 @@ class DesktopBridge:
                             continue
                         if path.stat().st_size > 50 * 1024 * 1024:
                             raise ValueError("单张图片不能超过 50 MB")
-                        workspace.add(path.read_bytes(), path.name)
+                        from backend.local_sources import digest
+                        data = path.read_bytes()
+                        key = workspace.add(data, path.name)
+                        workspace.get(key)['source'] = {'path': path.absolute(), 'digest': digest(data)}
             except Exception as exc:
                 for key in set(workspace.images) - before:
                     workspace.images.pop(key)["path"].unlink(missing_ok=True)
@@ -281,9 +284,9 @@ def main():
 
 
 if __name__ == "__main__":
-    if '--folder-picker' in sys.argv:
-        from backend.folder_picker import main as folder_picker
-        sys.exit(folder_picker(sys.argv[sys.argv.index('--folder-picker') + 1]))
+    if '--document-worker' in sys.argv:
+        from backend.document_worker import main as document_worker
+        sys.exit(document_worker(sys.argv[sys.argv.index('--document-worker') + 1]))
     if '--folder-picker' in sys.argv:
         from backend.folder_picker import main as folder_picker
         sys.exit(folder_picker(sys.argv[sys.argv.index('--folder-picker') + 1]))

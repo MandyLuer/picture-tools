@@ -170,3 +170,4 @@ logs/
 
 # Local input documents and certificates
 /data/
+/.local/

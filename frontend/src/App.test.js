@@ -36,12 +36,100 @@ beforeEach(() => {
 afterEach(() => { wrapper?.unmount(); document.body.innerHTML = ''; vi.unstubAllGlobals(); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('workspace actions', () => {
+  it('saves a linked image name to its source only when explicitly enabled', async () => {
+    state[0].has_source=true
+    await start()
+    expect(wrapper.get('.source-save-option input').element.checked).toBe(false)
+    await wrapper.get('.source-save-option input').setValue(true)
+    await wrapper.get('#filename').setValue('直接重命名')
+    fetch.mockResolvedValueOnce({ok:true,json:async()=>({id:'a',name:'直接重命名.png',revision:0})})
+    await click('保存名称')
+    expect(fetch.mock.calls.some(([path,options])=>path==='/api/images/a/source-name'&&options.method==='POST')).toBe(true)
+    expect(wrapper.text()).toContain('原文件已重命名，无需再次导出')
+    await click('↓ 导出全部图片')
+    const option=wrapper.get('.export-dialog .source-save-option input')
+    expect(option.element.checked).toBe(false)
+    await option.setValue(true)
+    expect(findButton('保存为 ZIP 压缩包').element.disabled).toBe(true)
+  })
+  it('generates a name beside the image without opening a dialog or saving it automatically', async () => {
+    await start()
+    const originalFetch = fetch.getMockImplementation()
+    fetch.mockImplementation(async (path, options = {}) => {
+      if (path === '/api/ai/settings') return {ok:true,json:async()=>({active:'local',profiles:{local:{model:'vision',base_url:'http://localhost:11434/v1'}}})}
+      if (path === '/api/ai/jobs') return {ok:true,json:async()=>({status:'completed',results:[{id:'a',status:'success',name:'设备示意图',reason:'包含设备连接关系',needs_review:true}]})}
+      return originalFetch(path, options)
+    })
+    await click('＋')
+    const transform = wrapper.get('.picture').attributes('style')
+    await click('AI 生成名称')
+    expect(wrapper.get('#filename').element.value).toBe('设备示意图')
+    expect(wrapper.get('.image-item.active').text()).toContain('a.png')
+    expect(wrapper.get('.ai-name-suggestion').text()).toContain('请核对 AI 建议')
+    expect(wrapper.get('.picture').attributes('style')).toBe(transform)
+    expect(wrapper.get('.ai-dialog').element.open).toBe(false)
+    expect(fetch.mock.calls.some(([,options])=>options.method==='PATCH')).toBe(false)
+    const request=fetch.mock.calls.find(([path])=>path==='/api/ai/jobs')
+    expect(JSON.parse(request[1].body)).toEqual({provider:'local',images:['a']})
+    await click('下一张 →')
+    expect(wrapper.find('.ai-name-suggestion').exists()).toBe(false)
+    expect(wrapper.get('#filename').element.value).toBe('b')
+  })
+
+  it('opens configuration when no model is configured and does not start generation', async () => {
+    await start()
+    const originalFetch = fetch.getMockImplementation()
+    fetch.mockImplementation(async (path, options = {}) => {
+      if (path === '/api/ai/settings') return {ok:true,json:async()=>({active:'local',profiles:{local:{label:'本地',model:'',base_url:'http://localhost:11434/v1'}}})}
+      return originalFetch(path,options)
+    })
+    await click('AI 生成名称')
+    expect(wrapper.get('.ai-dialog').element.open).toBe(true)
+    expect(wrapper.get('.ai-dialog h2').text()).toBe('AI 配置')
+    expect(fetch.mock.calls.some(([path])=>path==='/api/ai/jobs')).toBe(false)
+    expect(wrapper.get('#filename').element.value).toBe('a')
+  })
+
+  it('keeps the name draft intact and displays a failed generation reason', async () => {
+    await start()
+    const originalFetch=fetch.getMockImplementation()
+    fetch.mockImplementation(async(path,options={})=>{
+      if(path==='/api/ai/settings')return{ok:true,json:async()=>({active:'local',profiles:{local:{model:'vision',base_url:'http://localhost:11434/v1'}}})}
+      if(path==='/api/ai/jobs')return{ok:true,json:async()=>({status:'completed',results:[{id:'a',status:'failed',error:'模型不支持图片输入'}]})}
+      return originalFetch(path,options)
+    })
+    await wrapper.get('#filename').setValue('手动草稿')
+    await click('AI 生成名称')
+    expect(wrapper.get('#filename').element.value).toBe('手动草稿')
+    expect(wrapper.text()).toContain('模型不支持图片输入')
+    expect(findButton('AI 生成名称').element.disabled).toBe(false)
+  })
+
+  it('renames only the active item without resetting its view before moving to the next image', async () => {
+    await start()
+    await click('＋')
+    await click('选区裁剪')
+    const transform = wrapper.get('.picture').attributes('style')
+    const previewUrl = wrapper.get('.picture img').attributes('src')
+    await wrapper.get('#filename').setValue('重新命名')
+    fetch.mockResolvedValueOnce({ok:true,json:async () => ({id:'a',name:'重新命名.png',revision:0})})
+    await click('保存名称')
+    expect(wrapper.get('.image-item.active').text()).toContain('重新命名.png')
+    expect(wrapper.get('.picture').attributes('style')).toBe(transform)
+    expect(wrapper.get('.picture img').attributes('src')).toBe(previewUrl)
+    expect(wrapper.get('.stage').classes()).toContain('cropping')
+    expect(fetch.mock.calls.some(([path,options]) => path==='/api/images/a?compact=true' && options.method==='PATCH')).toBe(true)
+    await click('下一张 →')
+    expect(wrapper.get('#filename').element.value).toBe('b')
+    expect(wrapper.get('.image-item.active').text()).toContain('b.png')
+    expect(wrapper.get('.stage').classes()).not.toContain('cropping')
+  })
   it('switches feature menus without losing the selected image or unfinished edits', async () => {
     await start()
     await wrapper.findAll('.image-item')[1].trigger('click')
     await wrapper.get('#filename').setValue('待保存名称')
     await click('选区裁剪')
-    expect(wrapper.get('[role="tabpanel"] input').attributes('accept')).toBe('.docx')
+    expect(wrapper.get('[role="tabpanel"] input').attributes('accept')).toBe('.doc,.docx')
     expect(wrapper.get('aside').find('input[type="file"]').exists()).toBe(false)
     await click('本地图片')
     expect(wrapper.get('[role="tabpanel"] input').attributes('accept')).toBe('image/*')

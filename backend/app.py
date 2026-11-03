@@ -26,7 +26,7 @@ class Edit(BaseModel):
     quality: int = Field(default=85, ge=1, le=100)
 
 
-def create_app(token=None):
+def create_app(token=None, ai_settings_path=None):
     workspace = Workspace()
     lock = threading.RLock()
     export_picker_lock = threading.Lock()
@@ -36,11 +36,13 @@ def create_app(token=None):
         yield
         workspace.close()
 
-    app = FastAPI(title="拾图 Shitu · Word 图片工作台", version="2.6.0", lifespan=lifespan)
+    app = FastAPI(title="拾图 Shitu · Word 图片工作台", version="2.7.0", lifespan=lifespan)
     app.state.workspace = workspace
     app.state.lock = lock
     from .certificate_batch import register_certificate_routes
     register_certificate_routes(app)
+    from .ai_naming import register_ai_routes
+    register_ai_routes(app, ai_settings_path)
 
     @app.middleware("http")
     async def protect(request: Request, call_next):
@@ -82,38 +84,72 @@ def create_app(token=None):
             try:
                 for file in files:
                     data = file.file.read(MAX_FILE + 1)
-                    if (file.filename or "").lower().endswith(".docx"):
+                    if (file.filename or "").lower().endswith((".doc", ".docx")):
                         workspace.extract(data, file.filename or "Word 文档")
                     else:
                         workspace.add(data, file.filename or "image")
             except Exception as exc:
                 for key in set(workspace.images) - before:
                     workspace.images.pop(key)["path"].unlink(missing_ok=True)
-                raise HTTPException(400, "导入失败，请检查文件格式、大小和文档内容") from exc
+                detail = str(exc) if isinstance(exc, ValueError) else '请检查文件格式、大小和文档内容'
+                raise HTTPException(400, f'导入失败：{detail}') from exc
             return workspace.listing()
 
+    @app.post('/api/import/source-folder')
+    def import_source_folder(request: Request):
+        if not request.client or request.client.host not in ('127.0.0.1', '::1'):
+            raise HTTPException(403, '关联原文件夹仅支持本机访问')
+        from .folder_picker import choose_export_folder
+        from .local_sources import import_folder
+        with lock:
+            generation = workspace.root
+        folder = choose_export_folder()
+        if not folder:
+            return {'cancelled': True}
+        with lock:
+            if workspace.root != generation:
+                raise ValueError('工作区已变化，请重新导入')
+            count = import_folder(workspace, folder)
+            return {'count':count, 'images':workspace.listing()}
+
+    @app.post('/api/images/{key}/source-name')
+    def save_source_name(key: str, body: Rename):
+        from .local_sources import rename_source
+        with lock:
+            return rename_source(workspace, key, body.name)
+
     @app.get("/api/images/{key}/file")
-    def image(key: str, preview: bool = False, thumbnail: bool = False):
+    def image(key: str, request: Request, preview: bool = False, thumbnail: bool = False, revision: int | None = None):
         with lock:
             item = workspace.get(key)
             if preview:
-                output = io.BytesIO()
-                with Image.open(item["path"]) as source:
-                    rendered = source.convert("RGBA")
-                    if thumbnail:
-                        rendered.thumbnail((96, 96))
-                    rendered.save(output, "PNG")
-                output.seek(0)
-                return StreamingResponse(output, media_type="image/png", headers={"Cache-Control": "no-store"})
-            # Snapshot bytes under the lock. Lazy file streaming could otherwise
-            # race with an in-place edit, deletion or workspace clear on Windows.
-            return Response(item['path'].read_bytes(), media_type=mimetypes.guess_type(item['name'])[0] or 'application/octet-stream',
-                            headers={"Cache-Control": "no-store", "Content-Disposition": "attachment; filename*=UTF-8''" + quote(item['name'])})
+                current_revision = item['revision']
+                etag = f'"{key}-{current_revision}-{int(thumbnail)}"'
+                headers = {'Cache-Control': 'private, max-age=31536000, immutable' if revision == current_revision else 'no-store', 'ETag': etag}
+                if request.headers.get('if-none-match') == etag:
+                    return Response(status_code=304, headers=headers)
+                cached = workspace.cached_preview(key, current_revision, thumbnail)
+                if cached is not None:
+                    return Response(cached, media_type='image/png', headers=headers)
+                # Copy source bytes while protected, but decode outside the lock
+                # so a cold large preview cannot hold up rename/list requests.
+                source = item['path'].read_bytes()
+                image_format, animated = item['format'], item['animated']
+            else:
+                return Response(item['path'].read_bytes(), media_type=mimetypes.guess_type(item['name'])[0] or 'application/octet-stream',
+                                headers={"Cache-Control": "no-store", "Content-Disposition": "attachment; filename*=UTF-8''" + quote(item['name'])})
+        data = workspace.render_preview(source, image_format, animated, thumbnail)
+        with lock:
+            workspace.cache_preview(key, current_revision, thumbnail, data)
+        return Response(data, media_type='image/png', headers=headers)
 
     @app.patch("/api/images/{key}")
-    def rename(key: str, body: Rename):
+    def rename(key: str, body: Rename, compact: bool = False):
         with lock:
             workspace.rename(key, body.name)
+            if compact:
+                item = workspace.get(key)
+                return {field: item[field] for field in ('id', 'name', 'revision')}
             return workspace.listing()
 
     @app.post("/api/images/{key}/edit")
@@ -128,7 +164,7 @@ def create_app(token=None):
             return StreamingResponse(io.BytesIO(workspace.export_zip()), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="images.zip"'})
 
     @app.post('/api/export/folder')
-    def export_to_system_folder(request: Request):
+    def export_to_system_folder(request: Request, remove_originals: bool = False):
         if not request.client or request.client.host not in ('127.0.0.1', '::1'):
             raise HTTPException(403, '系统文件夹导出仅适用于本机访问，请使用 ZIP 压缩包')
         if not export_picker_lock.acquire(blocking=False):
@@ -145,6 +181,9 @@ def create_app(token=None):
             with lock:
                 if workspace.root != generation:
                     raise ValueError('工作区已变化，请重新导出')
+                if remove_originals:
+                    from .local_sources import export_and_remove
+                    return export_and_remove(workspace, target)
                 workspace.export_folder(target)
                 return {'count': len(workspace.images), 'folder': Path(target).name}
         finally:

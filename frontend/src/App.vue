@@ -1,5 +1,14 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import AiNamingDialog from './AiNamingDialog.vue'
+const aiDialog = ref(null)
+const aiGenerating = ref(false), aiSuggestion = ref(null)
+function applyAiNames(updated) {
+  const names = new Map(updated.map(item=>[item.id,item.name]))
+  images.value.forEach(item=>{if(names.has(item.id))item.name=names.get(item.id)})
+  name.value=current.value?.name.replace(/\.[^.]+$/,'')||''
+  aiSuggestion.value=null
+}
 const images = ref([]), selected = ref(''), name = ref(''), busy = ref(false), message = ref(''), failed = ref(false)
 const zoom = ref(1), pan = ref({x:0,y:0}), cropMode = ref(false), crop = ref(null), photo = ref(null), quality = ref(85), desktop = ref(false)
 const token = new URLSearchParams(location.search).get('token') || ''
@@ -7,11 +16,14 @@ const brandIcon = '/shitu.png'
 const filenameInput = ref(null)
 const imageList = ref(null), confirmationDialog = ref(null), pendingRemoval = ref(null), removalError = ref('')
 const exportDialog = ref(null)
+const saveToSource = ref(false), removeOriginals = ref(false)
+const sourceCount = computed(() => images.value.filter(item => item.has_source).length)
 const canExportFolder = computed(() => desktop.value || typeof window.showDirectoryPicker === 'function' || ['localhost','127.0.0.1','[::1]'].includes(location.hostname))
 function openExportDialog() {
   if (busy.value || !images.value.length) return
   failed.value = false
   exportDialog.value.showModal()
+  removeOriginals.value = false
 }
 function closeExportDialog() { if (!busy.value) exportDialog.value.close() }
 async function chooseExport(format) {
@@ -22,7 +34,7 @@ const focusMode = ref(false), showContext = ref(true), notifications = ref([])
 const requestedMenu = new URLSearchParams(location.search).get('menu')
 const activeMenu = ref(['word','local','certificate'].includes(requestedMenu) ? requestedMenu : 'word')
 const menus = [
-  {id:'word', label:'Word 提图', hint:'按文档顺序提取图片，同时关联上下文描述。', empty:'导入 Word 文档，开始提取图片', detail:'点击上方“导入 Word 文档”，选择 .docx 文件。'},
+  {id:'word', label:'Word 提图', hint:'支持 DOC / DOCX，按文档顺序提图并关联描述。', empty:'导入 Word 文档，开始提取图片', detail:'点击上方“导入 Word 文档”，选择 .doc 或 .docx 文件。'},
   {id:'local', label:'本地图片', hint:'导入已有图片或整个文件夹，统一重命名与编辑。', empty:'添加图片，开始整理', detail:'点击上方“导入图片”或选择图片文件夹。'},
   {id:'certificate', label:'证书截图', hint:'批量处理证书，自选截图字段并查看逐项结果。', empty:'将证书信息变成图片', detail:'点击上方“证书自动截图”，批量添加证书并选择截图字段。'},
 ]
@@ -79,7 +91,18 @@ function notify(text, type = 'success') {
 const current = computed(() => images.value.find(i => i.id === selected.value))
 const index = computed(() => images.value.findIndex(i => i.id === selected.value))
 const url = (image, thumbnail = false) => `/api/images/${image.id}/file?preview=true&thumbnail=${thumbnail}&revision=${image.revision}&token=${encodeURIComponent(token)}`
+let adjacentPreviews = []
+watch([selected, () => current.value?.revision, () => images.value.length], () => {
+  adjacentPreviews = [images.value[index.value + 1], images.value[index.value - 1]].filter(Boolean).map(item => {
+    const preview = new Image()
+    preview.decoding = 'async'
+    preview.src = url(item)
+    preview.decode?.().catch(() => {})
+    return preview
+  })
+})
 watch(current, value => { name.value = value?.name.replace(/\.[^.]+$/, '') || ''; zoom.value = 1; pan.value = {x:0,y:0}; crop.value = null; cropMode.value = false })
+watch([selected, () => current.value?.revision], () => { aiSuggestion.value=null })
 watch(selected, async () => {
   await nextTick()
   const list = imageList.value, item = list?.querySelector('.image-item.active')
@@ -126,7 +149,63 @@ function useDescription(candidate) {
   message.value = '描述已填入文件名称，可修改后点击“保存名称”'
   filenameInput.value?.focus()
 }
-async function rename() { await run(async () => { images.value = await api(`/images/${selected.value}`, {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.value})}) }, '名称已保存') }
+async function rename() {
+  const id = selected.value
+  await run(async () => {
+    const original = saveToSource.value && current.value?.has_source
+    const result = await api(original ? `/images/${id}/source-name` : `/images/${id}?compact=true`, {method:original?'POST':'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.value})})
+    const updated = Array.isArray(result) ? result.find(item => item.id === id) : result
+    const existing = images.value.find(item => item.id === id)
+    if (updated && existing) {
+      existing.name = updated.name
+      aiSuggestion.value=null
+      if (selected.value === id) name.value = updated.name.replace(/\.[^.]+$/, '')
+    }
+  }, saveToSource.value && current.value?.has_source ? '原文件已重命名，无需再次导出' : '名称已保存')
+}
+async function importSourceFolder() {
+  await run(async () => {
+    const result = await api('/import/source-folder', {method:'POST'})
+    if (result.cancelled) return result
+    images.value = result.images
+    selected.value = images.value.find(item => item.has_source)?.id || images.value[0]?.id || ''
+    return result
+  }, result => `已关联并导入 ${result.count} 张图片，可选择原位置重命名`)
+}
+async function generateAiName() {
+  if (!current.value || busy.value) return
+  const target = {...current.value}
+  let needsSettings = false
+  aiGenerating.value = true
+  try {
+    await run(async () => {
+      const settings = await api('/ai/settings')
+      const profile = settings.profiles[settings.active]
+      if (!profile?.model?.trim() || !profile.base_url?.trim() || (['openai','deepseek'].includes(settings.active) && !profile.has_api_key)) {
+        needsSettings = true
+        return {cancelled:true}
+      }
+      aiSuggestion.value = null
+      let job = await api('/ai/jobs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:settings.active,images:[target.id]})})
+      while (['running','cancelling'].includes(job.status)) {
+        await new Promise(resolve => setTimeout(resolve,650))
+        if (disposed) return {cancelled:true}
+        job = await api('/ai/jobs/'+job.id)
+      }
+      const result = job.results.find(row => row.id === target.id)
+      if (result?.status !== 'success') throw new Error(result?.error || '未能生成图片名称，请重试')
+      if (selected.value !== target.id || current.value?.revision !== target.revision) throw new Error('当前图片已变化，请重新生成名称')
+      name.value = result.name
+      aiSuggestion.value = {reason:result.reason,needsReview:result.needs_review}
+      await nextTick()
+      filenameInput.value?.focus()
+    }, 'AI 名称已填入，可修改后点击“保存名称”')
+  } finally { aiGenerating.value = false }
+  if (needsSettings) {
+    notify('请先配置 AI 模型并保存，再生成名称', 'error')
+    await aiDialog.value.openSettings()
+  }
+}
 async function edit(operation) {
   await run(async () => { const result = await api(`/images/${selected.value}/edit`, {method:'POST', headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,box:crop.value,quality:Number(quality.value)})}); images.value = result.images; selected.value = result.selected }, '当前图片已更新')
 }
@@ -176,7 +255,7 @@ function motion(e) {
   else pan.value = {x:drag.pan.x+e.clientX-drag.x,y:drag.pan.y+e.clientY-drag.y}
 }
 const cropStyle = computed(() => { const b=crop.value,i=current.value; return b&&i ? {left:b[0]/i.width*100+'%',top:b[1]/i.height*100+'%',width:(b[2]-b[0])/i.width*100+'%',height:(b[3]-b[1])/i.height*100+'%'} : {} })
-function key(e) { if (pendingRemoval.value || certificateDialog.value?.open || exportDialog.value?.open) return; if (e.key === 'Escape') { focusMode.value = false; return } if (['INPUT','TEXTAREA','SELECT','BUTTON'].includes(e.target.tagName)) return; if (['ArrowUp','ArrowLeft','ArrowDown','ArrowRight'].includes(e.key)) { e.preventDefault(); move(['ArrowUp','ArrowLeft'].includes(e.key)?-1:1) } }
+function key(e) { if (pendingRemoval.value || certificateDialog.value?.open || exportDialog.value?.open || document.querySelector('.ai-dialog[open]')) return; if (e.key === 'Escape') { focusMode.value = false; return } if (['INPUT','TEXTAREA','SELECT','BUTTON'].includes(e.target.tagName)) return; if (['ArrowUp','ArrowLeft','ArrowDown','ArrowRight'].includes(e.key)) { e.preventDefault(); move(['ArrowUp','ArrowLeft'].includes(e.key)?-1:1) } }
 async function openCertificateDialog() {
   if (busy.value) return
   const cleared = await run(async () => {
@@ -257,6 +336,7 @@ async function writeExportFile(handle, data) {
 }
 async function exportFolder() {
   if (!images.value.length || busy.value) return false
+  if (removeOriginals.value) return exportSystemFolder()
   if (desktop.value) return local('export_folder')
   return run(async () => {
     const systemFolder = () => api('/export/folder', {method:'POST'})
@@ -293,8 +373,16 @@ async function exportFolder() {
 }
 async function exportSystemFolder() {
   if (!images.value.length || busy.value) return false
-  if (desktop.value) return local('export_folder')
-  const success = await run(() => api('/export/folder', {method:'POST'}), result => `导出完成，已将 ${result.count} 张图片保存到文件夹“${result.folder}”`)
+  if (desktop.value && !removeOriginals.value) return local('export_folder')
+  const success = await run(async () => {
+    const result = await api('/export/folder' + (removeOriginals.value ? '?remove_originals=true' : ''), {method:'POST'})
+    if (result.cancelled) return result
+    if (removeOriginals.value) {
+      await refresh()
+      if (result.errors?.length) throw new Error(`已导出 ${result.count} 张，删除原图 ${result.removed} 张；以下原图未删除：${result.errors.join('、')}`)
+    }
+    return result
+  }, result => `导出完成，已将 ${result.count} 张图片保存到文件夹“${result.folder}”${result.removed !== undefined ? `，已删除 ${result.removed} 张关联原图` : ''}`)
   if (success) closeExportDialog()
   return success
 }
@@ -320,7 +408,7 @@ async function exportZip() {
 }
 function ready() { desktop.value = true }
 onMounted(async () => { desktop.value = !!window.pywebview?.api; window.addEventListener('pywebviewready',ready); window.addEventListener('keydown',key); await run(refresh); if (!disposed && requestedMenu === 'certificate') openCertificateDialog() })
-onUnmounted(() => { disposed = true; window.removeEventListener('keydown',key); window.removeEventListener('pywebviewready',ready); notificationTimers.forEach(clearTimeout); notificationTimers.clear() })
+onUnmounted(() => { disposed = true; adjacentPreviews = []; window.removeEventListener('keydown',key); window.removeEventListener('pywebviewready',ready); notificationTimers.forEach(clearTimeout); notificationTimers.clear() })
 </script>
 
 <template>
@@ -328,12 +416,12 @@ onUnmounted(() => { disposed = true; window.removeEventListener('keydown',key); 
     <header class="app-header"><div class="brand"><img class="brand-icon" :src="brandIcon" alt="拾图 Shitu"><h1>拾图 Shitu</h1></div><nav class="feature-menu" role="tablist" aria-label="功能菜单"><button v-for="item in menus" :id="`menu-${item.id}`" :key="item.id" :data-menu="item.id" role="tab" :aria-selected="activeMenu===item.id" :aria-controls="`panel-${item.id}`" :tabindex="activeMenu===item.id ? 0 : -1" :disabled="busy" :class="{active:activeMenu===item.id}" @click="activeMenu=item.id" @keydown="menuKey">{{ item.label }}</button></nav><span class="badge">{{ desktop ? '桌面版 · 本地处理' : '本地图片工作台' }}</span></header>
     <div class="command-bar">
       <section :id="`panel-${activeMenu}`" class="feature-panel" role="tabpanel" :aria-labelledby="`menu-${activeMenu}`">
-        <template v-if="activeMenu==='word'"><label class="import">＋ 导入 Word 文档<input type="file" accept=".docx" :disabled="busy" @change="upload"></label></template>
-        <template v-else-if="activeMenu==='local'"><label class="import">导入图片<input type="file" accept="image/*" multiple :disabled="busy" @change="upload"></label><label v-if="!desktop" class="folder">选择图片文件夹<input type="file" webkitdirectory multiple :disabled="busy" @change="upload"></label><button v-else :disabled="busy" @click="local('import_folder')">选择本地图片文件夹</button></template>
+        <template v-if="activeMenu==='word'"><label class="import">＋ 导入 Word 文档<input type="file" accept=".doc,.docx" multiple :disabled="busy" @change="upload"></label><small class="word-format-note">DOC 自动转换需本机安装 Word 或 LibreOffice</small></template>
+        <template v-else-if="activeMenu==='local'"><label class="import">导入图片<input type="file" accept="image/*" multiple :disabled="busy" @change="upload"></label><label v-if="!desktop" class="folder">选择图片文件夹<input type="file" webkitdirectory multiple :disabled="busy" @change="upload"></label><button v-else :disabled="busy" @click="local('import_folder')">选择本地图片文件夹</button><button v-if="!desktop && canExportFolder" :disabled="busy" @click="importSourceFolder">关联原文件夹</button></template>
         <template v-else><button class="certificate-entry primary" :disabled="busy" @click="openCertificateDialog">▣ 证书自动截图</button></template>
         <p class="feature-hint">{{ menu.hint }}</p>
       </section>
-      <div class="workspace-actions" role="group" aria-label="工作区操作"><button class="primary" :disabled="!images.length||busy" @click="openExportDialog">↓ 导出全部图片</button><button class="clear-workspace" :disabled="!images.length||busy" @click="requestRemoval()">清空工作区</button></div>
+      <div class="workspace-actions" role="group" aria-label="工作区操作"><button :disabled="busy" @click="aiDialog.openSettings()">AI 配置</button><button class="primary" :disabled="!images.length||busy" @click="openExportDialog">↓ 导出全部图片</button><button class="clear-workspace" :disabled="!images.length||busy" @click="requestRemoval()">清空工作区</button></div>
     </div>
     <div class="layout">
       <aside aria-label="工作区图片">
@@ -347,10 +435,12 @@ onUnmounted(() => { disposed = true; window.removeEventListener('keydown',key); 
           <div class="report-heading"><b>{{ certificateSummary(certificateReport) }}</b><button aria-label="关闭截图结果" @click="certificateReport=null">×</button></div>
           <details v-if="certificateReport.results.some(row=>row.status==='failed')" open><summary>失败详情（证书 / 字段 / 原因）</summary><div class="report-failures"><article v-for="row in certificateReport.results.filter(item=>item.status==='failed')" :key="row.id"><b>{{ row.filename }}</b><span>{{ row.failed_field ? '失败字段：'+row.failed_field : row.failed_stage==='import' ? '失败阶段：导入截图' : '失败阶段：证书截图' }}</span><p>{{ row.error || '未返回具体原因，请重试' }}</p></article></div><p class="report-note">失败证书的截图未导入；此前成功证书的结果已保留。请调整字段或证书后重试。</p></details>
         </section>
-        <fieldset :disabled="!current||busy" class="rename"><label for="filename">文件名称</label><input id="filename" ref="filenameInput" v-model="name" @keydown.enter="rename"><span>{{ current?.name.match(/\.[^.]+$/)?.[0] }}</span><button class="primary" @click="rename">保存名称</button></fieldset>
+        <fieldset :disabled="!current||busy" class="rename"><label for="filename">文件名称</label><input id="filename" ref="filenameInput" v-model="name" @keydown.enter="rename"><span>{{ current?.name.match(/\.[^.]+$/)?.[0] }}</span><button class="ai-name-button" @click="generateAiName">{{ aiGenerating?'AI 生成中…':'AI 生成名称' }}</button><button class="primary" @click="rename">保存名称</button><button class="ai-batch-button" @click="aiDialog.openBatch()">批量命名</button></fieldset>
+        <label v-if="current?.has_source" class="source-save-option"><input v-model="saveToSource" type="checkbox" :disabled="busy">原位置重命名（保存名称时直接修改原文件名，无需导出）</label>
+        <p v-if="aiSuggestion" class="ai-name-suggestion" role="status"><b>{{ aiSuggestion.needsReview?'请核对 AI 建议':'AI 名称已生成' }}</b><span v-if="aiSuggestion.reason">{{ aiSuggestion.reason }}</span><span>可修改名称，点击“保存名称”后生效。</span></p>
         <div :class="['preview-layout', { 'with-context': current?.contexts?.length && showContext }]">
         <div class="stage" :class="{cropping:cropMode}" @pointerdown="down" @pointermove="motion" @pointerup="drag=null" @pointercancel="drag=null" @wheel.prevent="zoom=Math.max(.1,Math.min(4,zoom*($event.deltaY<0?1.1:.9)))">
-          <div v-if="current" class="picture" :style="{transform:`translate(${pan.x}px,${pan.y}px) scale(${zoom})`}"><img ref="photo" :src="url(current)" :alt="current.name" draggable="false"><div v-if="crop" class="crop-box" :style="cropStyle"></div></div>
+          <div v-if="current" class="picture" :style="{transform:`translate(${pan.x}px,${pan.y}px) scale(${zoom})`}"><img ref="photo" :src="url(current)" :alt="current.name" draggable="false" decoding="async"><div v-if="crop" class="crop-box" :style="cropStyle"></div></div>
           <div v-else class="placeholder"><div class="placeholder-icon">▧</div><h2>{{ menu.empty }}</h2><p>{{ menu.detail }}</p><small>导入后，可在此预览、重命名、旋转、裁剪和压缩</small></div>
         </div>
         <section v-if="current?.contexts?.length && showContext" class="document-context" aria-label="文档参考描述">
@@ -372,7 +462,7 @@ onUnmounted(() => { disposed = true; window.removeEventListener('keydown',key); 
         <fieldset :disabled="!current||busy" class="tools"><div><span class="tool-label">旋转与翻转</span><button @click="edit('left')">↶ 左转 90°</button><button @click="edit('right')">↷ 右转 90°</button><button @click="edit('horizontal')">水平翻转</button><button @click="edit('vertical')">垂直翻转</button></div><div><span class="tool-label">裁剪与压缩</span><button @click="cropMode=!cropMode;crop=null">{{ cropMode?'取消裁剪':'选区裁剪' }}</button><button :disabled="!crop" @click="edit('crop')">保存裁剪</button><label>JPEG 质量 <input v-model="quality" type="number" min="1" max="100"></label><button @click="edit('compress')">压缩图片</button></div><p>操作直接更新当前图片，保留名称与参考描述；导出时使用修改后的结果。PNG 使用无损优化。</p></fieldset>
         <div role="status" aria-live="polite" :class="['status',{error:failed}]">{{ busy ? '正在处理，请稍候…' : message || '就绪 · 图片在当前工作区处理，请在退出前导出' }}</div>
       </main>
-    </div><footer>拾图 SHITU · 2.6.0 <span>让每一张图片，各得其名。</span></footer>
+    </div><footer>拾图 SHITU · 2.7.0 <span>让每一张图片，各得其名。</span></footer>
     <dialog ref="confirmationDialog" aria-labelledby="removal-title" class="removal-dialog" @cancel.prevent="cancelRemoval">
       <h2 id="removal-title">{{ pendingRemoval?.id ? '删除这张图片？' : '清空工作区？' }}</h2>
       <p>{{ pendingRemoval?.id ? `将从当前工作区删除“${pendingRemoval.name}”。` : `将清空当前工作区的 ${images.length} 张图片及其编辑结果，请先导出需要的内容。` }}</p>
@@ -398,10 +488,13 @@ onUnmounted(() => { disposed = true; window.removeEventListener('keydown',key); 
     </dialog>
     <dialog ref="exportDialog" class="export-dialog" aria-labelledby="export-title" @cancel.prevent="closeExportDialog">
       <h2 id="export-title">导出全部图片</h2><p class="muted">共 {{ images.length }} 张，保留当前文件名称、格式和编辑结果。</p>
-      <div class="export-options"><div><button class="primary" :disabled="busy || !canExportFolder" @click="chooseExport('folder')">保存到文件夹</button><p>{{ canExportFolder ? '选择目标文件夹，逐张保存图片；遇到同名文件会停止，避免覆盖。' : '系统文件夹导出仅支持本机服务；也可使用 ZIP 压缩包导出。' }}</p></div><div><button :disabled="busy" @click="chooseExport('zip')">保存为 ZIP 压缩包</button><p>将全部图片打包为一个 ZIP 文件，方便保存和分发。</p></div></div>
+      <label v-if="sourceCount" class="source-save-option"><input v-model="removeOriginals" type="checkbox" :disabled="busy">保存到文件夹后删除 {{ sourceCount }} 张关联原图（默认保留）</label>
+      <p v-if="removeOriginals" class="muted">请选择新的目标文件夹；全部导出并校验成功后删除关联原图。普通上传、Word 提图和证书截图不会被删除。仅适用于文件夹导出。</p>
+      <div class="export-options"><div><button class="primary" :disabled="busy || !canExportFolder" @click="chooseExport('folder')">保存到文件夹</button><p>{{ canExportFolder ? '选择目标文件夹，逐张保存图片；遇到同名文件会停止，避免覆盖。' : '系统文件夹导出仅支持本机服务；也可使用 ZIP 压缩包导出。' }}</p></div><div><button :disabled="busy || removeOriginals" @click="chooseExport('zip')">保存为 ZIP 压缩包</button><p>将全部图片打包为一个 ZIP 文件，方便保存和分发。</p></div></div>
       <p v-if="busy" class="export-progress" role="status">正在导出，请在系统弹出的文件夹选择框中确认目标目录；若选择框在后台，请切换到“拾图 Shitu”文件夹选择窗口。</p><p v-if="failed && message" class="removal-error" role="alert">{{ message }}</p>
       <div class="dialog-actions"><button v-if="!desktop && canExportFolder" :disabled="busy" @click="exportSystemFolder">使用系统文件夹选择框</button><button :disabled="busy" @click="closeExportDialog">取消</button></div>
     </dialog>
+    <AiNamingDialog ref="aiDialog" :images="images" :selected="selected" :token="token" @busy-change="busy=$event" @updated="applyAiNames" @notice="notify($event.text,$event.type)" />
     <div class="toast-stack" aria-live="polite" aria-atomic="false"><div v-for="item in notifications" :key="item.id" :class="['toast',item.type]" :role="item.type === 'error' ? 'alert' : 'status'"><span class="toast-icon" aria-hidden="true">{{ item.type === 'error' ? '!' : '✓' }}</span><span>{{ item.text }}</span><button :aria-label="'关闭提示：'+item.text" @click="dismissNotification(item.id)">×</button></div></div>
   </div>
 </template>
