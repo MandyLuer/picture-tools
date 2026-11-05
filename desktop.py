@@ -245,7 +245,7 @@ def main():
                     raise RuntimeError('Certificate screenshots did not reach the desktop image list')
                 if not (result and result["uiReady"] and result["desktopReady"] and result["imagesReady"]
                         and result["previewWidth"] > 0 and result["previewHeight"] > 0
-                        and result['menuCount'] == 3 and result['sidebarImports'] == 0
+                        and result['menuCount'] == 4 and result['sidebarImports'] == 0
                         and result['pageWidth'] <= result['viewportWidth'] + 1
                         and result["bridge"] == ["capture_certificate", "choose_certificate", "export_folder", "export_zip", "import_folder"]):
                     raise RuntimeError("Desktop UI/bridge readiness check failed")

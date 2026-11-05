@@ -57,6 +57,14 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .ai-name-button { color: #126c62; border-color: #a6c9b9; background: #edf7f1; }
 .ai-batch-button { font-size: 12px; color: #728291; }
 .source-save-option { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #48675d; margin: 0 0 10px; }
+.pdf-panel { flex: 1; min-height: 0; margin-top: 12px; overflow: auto; padding: 20px; }
+.pdf-files { overflow-y: auto; max-height: 45vh; padding-left: 28px; }
+.pdf-files li { padding: 6px 0; }
+.pdf-files li span { display: inline-block; min-width: min(280px, 50%); overflow-wrap: anywhere; }
+.pdf-files button { margin: 3px; }
+.pdf-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.pdf-actions label { display: flex; align-items: center; gap: 8px; width: min(560px, 100%); }
+.pdf-actions input { flex: 1; min-width: 0; }
 .ai-name-suggestion { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: -2px 0 10px; font-size: 12px; color: #728291; overflow-wrap: anywhere; }
 .ai-name-suggestion b { color: #126c62; font-weight: 500; }
 .rename span { color: #82919d; }

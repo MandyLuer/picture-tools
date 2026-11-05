@@ -32,12 +32,38 @@ async function chooseExport(format) {
 }
 const focusMode = ref(false), showContext = ref(true), notifications = ref([])
 const requestedMenu = new URLSearchParams(location.search).get('menu')
-const activeMenu = ref(['word','local','certificate'].includes(requestedMenu) ? requestedMenu : 'word')
 const menus = [
   {id:'word', label:'Word 提图', hint:'支持 DOC / DOCX，按文档顺序提图并关联描述。', empty:'导入 Word 文档，开始提取图片', detail:'点击上方“导入 Word 文档”，选择 .doc 或 .docx 文件。'},
   {id:'local', label:'本地图片', hint:'导入已有图片或整个文件夹，统一重命名与编辑。', empty:'添加图片，开始整理', detail:'点击上方“导入图片”或选择图片文件夹。'},
   {id:'certificate', label:'证书截图', hint:'批量处理证书，自选截图字段并查看逐项结果。', empty:'将证书信息变成图片', detail:'点击上方“证书自动截图”，批量添加证书并选择截图字段。'},
+  {id:'pdf', label:'PDF 合并'},
 ]
+const activeMenu = ref(menus.some(item => item.id === requestedMenu) ? requestedMenu : 'word')
+const pdfFiles = ref([]), pdfName = ref('合并文档'), pdfResult = ref(null)
+async function choosePdfs() {
+  await run(async () => {
+    const result = await api('/pdf/choose', {method: 'POST'})
+    if (result.cancelled) return result
+    pdfFiles.value = result.files
+    pdfResult.value = null
+  })
+}
+function movePdf(index, offset) {
+  const [item] = pdfFiles.value.splice(index, 1)
+  pdfFiles.value.splice(index + offset, 0, item)
+  pdfResult.value = null
+}
+async function mergePdfs() {
+  pdfResult.value = null
+  await run(async () => {
+    const body = new FormData()
+    pdfFiles.value.forEach(({id}) => body.append('source_ids', id))
+    body.append('name', pdfName.value)
+    const result = await api('/pdf/merge', {method: 'POST', body})
+    if (!result.cancelled) pdfResult.value = result
+    return result
+  }, result => `已保存 ${result.name}，共 ${result.pages} 页`)
+}
 const menu = computed(() => menus.find(item => item.id === activeMenu.value))
 function menuKey(event) {
   if (busy.value || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return
@@ -414,7 +440,7 @@ onUnmounted(() => { disposed = true; adjacentPreviews = []; window.removeEventLi
 <template>
   <div :class="['app', {'focus-mode': focusMode}]">
     <header class="app-header"><div class="brand"><img class="brand-icon" :src="brandIcon" alt="拾图 Shitu"><h1>拾图 Shitu</h1></div><nav class="feature-menu" role="tablist" aria-label="功能菜单"><button v-for="item in menus" :id="`menu-${item.id}`" :key="item.id" :data-menu="item.id" role="tab" :aria-selected="activeMenu===item.id" :aria-controls="`panel-${item.id}`" :tabindex="activeMenu===item.id ? 0 : -1" :disabled="busy" :class="{active:activeMenu===item.id}" @click="activeMenu=item.id" @keydown="menuKey">{{ item.label }}</button></nav><span class="badge">{{ desktop ? '桌面版 · 本地处理' : '本地图片工作台' }}</span></header>
-    <div class="command-bar">
+    <div v-if="activeMenu!=='pdf'" class="command-bar">
       <section :id="`panel-${activeMenu}`" class="feature-panel" role="tabpanel" :aria-labelledby="`menu-${activeMenu}`">
         <template v-if="activeMenu==='word'"><label class="import">＋ 导入 Word 文档<input type="file" accept=".doc,.docx" multiple :disabled="busy" @change="upload"></label><small class="word-format-note">DOC 自动转换需本机安装 Word 或 LibreOffice</small></template>
         <template v-else-if="activeMenu==='local'"><label class="import">导入图片<input type="file" accept="image/*" multiple :disabled="busy" @change="upload"></label><label v-if="!desktop" class="folder">选择图片文件夹<input type="file" webkitdirectory multiple :disabled="busy" @change="upload"></label><button v-else :disabled="busy" @click="local('import_folder')">选择本地图片文件夹</button><button v-if="!desktop && canExportFolder" :disabled="busy" @click="importSourceFolder">关联原文件夹</button></template>
@@ -423,7 +449,7 @@ onUnmounted(() => { disposed = true; adjacentPreviews = []; window.removeEventLi
       </section>
       <div class="workspace-actions" role="group" aria-label="工作区操作"><button :disabled="busy" @click="aiDialog.openSettings()">AI 配置</button><button class="primary" :disabled="!images.length||busy" @click="openExportDialog">↓ 导出全部图片</button><button class="clear-workspace" :disabled="!images.length||busy" @click="requestRemoval()">清空工作区</button></div>
     </div>
-    <div class="layout">
+    <div v-show="activeMenu!=='pdf'" class="layout">
       <aside aria-label="工作区图片">
         <div class="section-title"><h2>图片列表</h2><span>{{ images.length }} 张</span></div>
         <div ref="imageList" class="image-list" aria-label="图片列表" tabindex="0"><div v-for="(image,i) in images" :key="image.id" class="image-row"><button :class="['image-item',{active:selected===image.id}]" :disabled="busy" :aria-pressed="selected===image.id" @click="selected=image.id"><img :src="url(image,true)" alt="" loading="lazy" decoding="async"><span><b>{{ image.name }}</b><small>{{ image.width }} × {{ image.height }}</small></span><em>{{ String(i+1).padStart(2,'0') }}</em></button><button class="delete-image" :disabled="busy" :aria-label="'删除 '+image.name" :title="'删除 '+image.name" @click="requestRemoval(image)">×</button></div><p v-if="!images.length" class="empty-list">图片将在这里按顺序排列</p></div>
@@ -462,7 +488,28 @@ onUnmounted(() => { disposed = true; adjacentPreviews = []; window.removeEventLi
         <fieldset :disabled="!current||busy" class="tools"><div><span class="tool-label">旋转与翻转</span><button @click="edit('left')">↶ 左转 90°</button><button @click="edit('right')">↷ 右转 90°</button><button @click="edit('horizontal')">水平翻转</button><button @click="edit('vertical')">垂直翻转</button></div><div><span class="tool-label">裁剪与压缩</span><button @click="cropMode=!cropMode;crop=null">{{ cropMode?'取消裁剪':'选区裁剪' }}</button><button :disabled="!crop" @click="edit('crop')">保存裁剪</button><label>JPEG 质量 <input v-model="quality" type="number" min="1" max="100"></label><button @click="edit('compress')">压缩图片</button></div><p>操作直接更新当前图片，保留名称与参考描述；导出时使用修改后的结果。PNG 使用无损优化。</p></fieldset>
         <div role="status" aria-live="polite" :class="['status',{error:failed}]">{{ busy ? '正在处理，请稍候…' : message || '就绪 · 图片在当前工作区处理，请在退出前导出' }}</div>
       </main>
-    </div><footer>拾图 SHITU · 2.7.0 <span>让每一张图片，各得其名。</span></footer>
+    </div>
+    <main v-if="activeMenu==='pdf'" id="panel-pdf" class="pdf-panel" role="tabpanel" aria-labelledby="menu-pdf">
+      <h2>PDF 合并</h2>
+      <p class="muted">按列表顺序合并。保存窗口默认定位到第一份 PDF 所在的文件夹。</p>
+      <button :disabled="busy" @click="choosePdfs">{{ pdfFiles.length ? '重新选择 PDF 文件' : '选择 PDF 文件' }}</button>
+      <ol class="pdf-files">
+        <li v-for="({name,id}, index) in pdfFiles" :key="id">
+          <span>{{ name }}</span>
+          <button :disabled="busy || index===0" :aria-label="`上移 ${name}`" @click="movePdf(index,-1)">上移</button>
+          <button :disabled="busy || index===pdfFiles.length-1" :aria-label="`下移 ${name}`" @click="movePdf(index,1)">下移</button>
+          <button :disabled="busy" :aria-label="`移除 ${name}`" @click="pdfFiles.splice(index,1); pdfResult=null">移除</button>
+        </li>
+      </ol>
+      <div class="pdf-actions">
+        <label>输出文件名 <input v-model="pdfName" :disabled="busy" maxlength="80"> .pdf</label>
+        <button class="primary" :disabled="busy || pdfFiles.length<2" @click="mergePdfs">合并并保存</button>
+      </div>
+      <p v-if="busy" role="status">正在处理，请在系统选择框中确认。</p>
+      <p v-else-if="failed && message" role="alert">{{ message }}</p>
+      <p v-else-if="pdfResult" role="status">已保存到「{{ pdfResult.folder }}」中的 {{ pdfResult.name }}（{{ pdfResult.pages }} 页）。</p>
+    </main>
+    <footer>拾图 SHITU · 2.8.0 <span>让每一张图片，各得其名。</span></footer>
     <dialog ref="confirmationDialog" aria-labelledby="removal-title" class="removal-dialog" @cancel.prevent="cancelRemoval">
       <h2 id="removal-title">{{ pendingRemoval?.id ? '删除这张图片？' : '清空工作区？' }}</h2>
       <p>{{ pendingRemoval?.id ? `将从当前工作区删除“${pendingRemoval.name}”。` : `将清空当前工作区的 ${images.length} 张图片及其编辑结果，请先导出需要的内容。` }}</p>

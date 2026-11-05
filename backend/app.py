@@ -1,13 +1,14 @@
 import io
 import sys
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, ExitStack
+from uuid import uuid4
 from pathlib import Path
 from urllib.parse import quote
 import mimetypes
 import logging
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -30,13 +31,14 @@ def create_app(token=None, ai_settings_path=None):
     workspace = Workspace()
     lock = threading.RLock()
     export_picker_lock = threading.Lock()
+    pdf_sources = {}
 
     @asynccontextmanager
     async def lifespan(app):
         yield
         workspace.close()
 
-    app = FastAPI(title="拾图 Shitu · Word 图片工作台", version="2.7.0", lifespan=lifespan)
+    app = FastAPI(title="拾图 Shitu · Word 图片工作台", version="2.8.0", lifespan=lifespan)
     app.state.workspace = workspace
     app.state.lock = lock
     from .certificate_batch import register_certificate_routes
@@ -94,6 +96,47 @@ def create_app(token=None, ai_settings_path=None):
                 detail = str(exc) if isinstance(exc, ValueError) else '请检查文件格式、大小和文档内容'
                 raise HTTPException(400, f'导入失败：{detail}') from exc
             return workspace.listing()
+
+    @app.post('/api/pdf/choose')
+    def choose_pdfs(request: Request):
+        if not request.client or request.client.host not in ('127.0.0.1', '::1'):
+            raise HTTPException(403, 'PDF 选择仅支持本机访问')
+        if not export_picker_lock.acquire(blocking=False):
+            raise HTTPException(409, '请先完成或取消当前选择框')
+        try:
+            from .folder_picker import choose_pdf_files
+            paths = [Path(path) for path in choose_pdf_files()]
+            if not paths:
+                return {'cancelled': True}
+            if any(path.suffix.lower() != '.pdf' for path in paths):
+                raise ValueError('请选择 PDF 文件')
+            pdf_sources.clear()
+            pdf_sources.update((uuid4().hex, path) for path in paths)
+            return {'files': [{'id': key, 'name': path.name} for key, path in pdf_sources.items()]}
+        finally:
+            export_picker_lock.release()
+
+    @app.post('/api/pdf/merge')
+    def merge_pdf(request: Request, files: list[UploadFile] = File(default=[]),
+                  source_ids: list[str] = Form(default=[]), name: str = Form('合并文档')):
+        if not request.client or request.client.host not in ('127.0.0.1', '::1'):
+            raise HTTPException(403, 'PDF 保存仅支持本机访问')
+        if not export_picker_lock.acquire(blocking=False):
+            raise HTTPException(409, '已有文件夹选择任务，请先完成或取消')
+        try:
+            from .folder_picker import choose_export_folder
+            from .pdf_merge import merge_to_folder
+            if source_ids:
+                if any(key not in pdf_sources for key in source_ids):
+                    raise ValueError('PDF 选择已失效，请重新选择文件')
+                paths = [pdf_sources[key] for key in source_ids]
+                with ExitStack() as stack:
+                    selected = [UploadFile(stack.enter_context(path.open('rb')), filename=path.name,
+                                           size=path.stat().st_size) for path in paths]
+                    return merge_to_folder(selected, name, lambda: choose_export_folder(str(paths[0].parent)))
+            return merge_to_folder(files, name, choose_export_folder)
+        finally:
+            export_picker_lock.release()
 
     @app.post('/api/import/source-folder')
     def import_source_folder(request: Request):

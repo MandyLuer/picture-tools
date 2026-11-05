@@ -4,5 +4,7 @@ python-multipart>=0.0.18,<1
 pillow>=10.4,<13
 cryptography>=44,<49
 httpx>=0.28,<1
+pypdf>=6,<7
+pypdf>=6,<7
 pywin32>=306,<313; sys_platform == 'win32'
 pywinauto>=0.6.9,<0.7; sys_platform == 'win32'
