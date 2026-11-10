@@ -12,9 +12,9 @@ try {
         npm run build
         if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
     } finally { Pop-Location }
-    python -m PyInstaller --noconfirm --distpath dist/2.8.0 packaging/desktop.spec
+    python -m PyInstaller --noconfirm --distpath dist/2.9.0 packaging/desktop.spec
     if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed' }
-    $clientDir = Join-Path (Get-Location).Path 'dist/2.8.0/Shitu'
+    $clientDir = Join-Path (Get-Location).Path 'dist/2.9.0/Shitu'
     # Discover the executable instead of hardcoding its Chinese name: Windows
     # PowerShell 5.1 reads BOM-less UTF-8 scripts as ANSI and would mangle it.
     $deadline = (Get-Date).AddSeconds(30)
@@ -33,5 +33,5 @@ try {
         }
         if ($clientTest.ExitCode -ne 0) { throw 'Packaged desktop GUI smoke test failed' }
     }
-    Compress-Archive -LiteralPath 'dist/2.8.0/Shitu' -DestinationPath 'dist/Shitu-2.8.0-Windows-x64.zip' -Force
+    Compress-Archive -LiteralPath 'dist/2.9.0/Shitu' -DestinationPath 'dist/Shitu-2.9.0-Windows-x64.zip' -Force
 } finally { Pop-Location }

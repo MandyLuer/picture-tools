@@ -15,6 +15,11 @@ const token = new URLSearchParams(location.search).get('token') || ''
 const brandIcon = '/shitu.png'
 const filenameInput = ref(null)
 const imageList = ref(null), confirmationDialog = ref(null), pendingRemoval = ref(null), removalError = ref('')
+const checkedImages = ref([])
+watch(images, items => {
+  const ids = new Set(items.map(item => item.id))
+  checkedImages.value = checkedImages.value.filter(id => ids.has(id))
+})
 const exportDialog = ref(null)
 const saveToSource = ref(false), removeOriginals = ref(false)
 const sourceCount = computed(() => images.value.filter(item => item.has_source).length)
@@ -37,9 +42,32 @@ const menus = [
   {id:'local', label:'本地图片', hint:'导入已有图片或整个文件夹，统一重命名与编辑。', empty:'添加图片，开始整理', detail:'点击上方“导入图片”或选择图片文件夹。'},
   {id:'certificate', label:'证书截图', hint:'批量处理证书，自选截图字段并查看逐项结果。', empty:'将证书信息变成图片', detail:'点击上方“证书自动截图”，批量添加证书并选择截图字段。'},
   {id:'pdf', label:'PDF 合并'},
+  {id:'pdf-shot', label:'PDF 截图', hint:'按页渲染 PDF 为图片，支持页码范围与 150/300 DPI。', empty:'导入 PDF，按页截图', detail:'点击上方选择 PDF，设置页码范围与清晰度后导入。'},
 ]
 const activeMenu = ref(menus.some(item => item.id === requestedMenu) ? requestedMenu : 'word')
 const pdfFiles = ref([]), pdfName = ref('合并文档'), pdfResult = ref(null)
+const pdfShotFile = ref(null), pdfShotRange = ref(''), pdfShotDpi = ref(150), pdfShotInput = ref(null)
+function choosePdfShot(event) {
+  pdfShotFile.value = event.target.files?.[0] || null
+}
+async function importPdfPages() {
+  if (!pdfShotFile.value || busy.value) return
+  const file = pdfShotFile.value
+  await run(async () => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('pages', pdfShotRange.value)
+    form.append('dpi', String(pdfShotDpi.value))
+    const before = new Set(images.value.map(item => item.id))
+    const result = await api('/pdf/screenshot', {method:'POST', body:form})
+    images.value = result.images
+    const added = result.images.filter(item => !before.has(item.id))
+    if (added.length) selected.value = added[0].id
+    pdfShotFile.value = null
+    if (pdfShotInput.value) pdfShotInput.value.value = ''
+    return result.pages
+  }, pages => `已导入 ${pages} 页 PDF 图片`)
+}
 async function choosePdfs() {
   await run(async () => {
     const result = await api('/pdf/choose', {method: 'POST'})
@@ -241,6 +269,12 @@ function requestRemoval(image = null) {
   removalError.value = ''
   confirmationDialog.value.showModal()
 }
+function requestBatchRemoval() {
+  if (busy.value || !checkedImages.value.length) return
+  pendingRemoval.value = {ids: [...checkedImages.value]}
+  removalError.value = ''
+  confirmationDialog.value.showModal()
+}
 function cancelRemoval() {
   if (busy.value) return
   confirmationDialog.value.close()
@@ -251,16 +285,25 @@ async function confirmRemoval() {
   const action = pendingRemoval.value
   if (!action || busy.value) return
   removalError.value = ''
-  const removedIndex = images.value.findIndex(i => i.id === action.id)
+  const removedIndex = index.value
+  let batchResult
   const success = await run(async () => {
-    const remaining = await api(action.id ? `/images/${action.id}` : '/images', {method:'DELETE'})
+    if (action.ids) {
+      batchResult = await api('/images/batch-delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(action.ids)})
+    }
+    const remaining = batchResult?.images ?? await api(action.id ? `/images/${action.id}` : '/images', {method:'DELETE'})
+    const nextImage = images.value.slice(removedIndex + 1).find(item => remaining.some(other => other.id === item.id))
     images.value = remaining
-    if (!action.id || selected.value === action.id) {
-      selected.value = remaining[Math.min(Math.max(removedIndex, 0), remaining.length - 1)]?.id || ''
+    if (!remaining.some(item => item.id === selected.value)) {
+      selected.value = nextImage?.id || remaining.at(-1)?.id || ''
     }
     drag = null
     if (!remaining.length) { name.value = ''; zoom.value = 1; pan.value = {x:0,y:0}; crop.value = null; cropMode.value = false }
-  }, action.id ? '图片已从工作区删除' : '工作区已清空')
+    if (batchResult?.failed.length) {
+      pendingRemoval.value = {ids: batchResult.failed}
+      throw new Error(`已删除 ${batchResult.removed} 张，${batchResult.failed.length} 张暂时无法删除，可重试。`)
+    }
+  }, () => action.ids ? `已从工作区删除 ${batchResult.removed} 张图片` : action.id ? '图片已从工作区删除' : '工作区已清空')
   if (success) cancelRemoval()
   else removalError.value = message.value
 }
@@ -444,7 +487,8 @@ onUnmounted(() => { disposed = true; adjacentPreviews = []; window.removeEventLi
       <section :id="`panel-${activeMenu}`" class="feature-panel" role="tabpanel" :aria-labelledby="`menu-${activeMenu}`">
         <template v-if="activeMenu==='word'"><label class="import">＋ 导入 Word 文档<input type="file" accept=".doc,.docx" multiple :disabled="busy" @change="upload"></label><small class="word-format-note">DOC 自动转换需本机安装 Word 或 LibreOffice</small></template>
         <template v-else-if="activeMenu==='local'"><label class="import">导入图片<input type="file" accept="image/*" multiple :disabled="busy" @change="upload"></label><label v-if="!desktop" class="folder">选择图片文件夹<input type="file" webkitdirectory multiple :disabled="busy" @change="upload"></label><button v-else :disabled="busy" @click="local('import_folder')">选择本地图片文件夹</button><button v-if="!desktop && canExportFolder" :disabled="busy" @click="importSourceFolder">关联原文件夹</button></template>
-        <template v-else><button class="certificate-entry primary" :disabled="busy" @click="openCertificateDialog">▣ 证书自动截图</button></template>
+        <template v-else-if="activeMenu==='certificate'"><button class="certificate-entry primary" :disabled="busy" @click="openCertificateDialog">▣ 证书自动截图</button></template>
+        <template v-else><label class="import">＋ 选择 PDF 文件<input ref="pdfShotInput" type="file" accept=".pdf,application/pdf" :disabled="busy" @change="choosePdfShot"></label><label class="pdf-range">页码范围<input v-model="pdfShotRange" :disabled="busy" maxlength="200" placeholder="留空为全部，如 1-5,8"></label><label class="pdf-dpi">清晰度<select v-model.number="pdfShotDpi" :disabled="busy"><option :value="150">150 DPI</option><option :value="300">300 DPI</option></select></label><button class="primary" :disabled="busy || !pdfShotFile" @click="importPdfPages">{{ busy ? '正在处理…' : '导入页面' }}</button><small class="pdf-file-name">{{ pdfShotFile ? pdfShotFile.name : '每页生成一张 PNG，导入后统一命名与导出' }}</small></template>
         <p class="feature-hint">{{ menu.hint }}</p>
       </section>
       <div class="workspace-actions" role="group" aria-label="工作区操作"><button :disabled="busy" @click="aiDialog.openSettings()">AI 配置</button><button class="primary" :disabled="!images.length||busy" @click="openExportDialog">↓ 导出全部图片</button><button class="clear-workspace" :disabled="!images.length||busy" @click="requestRemoval()">清空工作区</button></div>
@@ -452,7 +496,11 @@ onUnmounted(() => { disposed = true; adjacentPreviews = []; window.removeEventLi
     <div v-show="activeMenu!=='pdf'" class="layout">
       <aside aria-label="工作区图片">
         <div class="section-title"><h2>图片列表</h2><span>{{ images.length }} 张</span></div>
-        <div ref="imageList" class="image-list" aria-label="图片列表" tabindex="0"><div v-for="(image,i) in images" :key="image.id" class="image-row"><button :class="['image-item',{active:selected===image.id}]" :disabled="busy" :aria-pressed="selected===image.id" @click="selected=image.id"><img :src="url(image,true)" alt="" loading="lazy" decoding="async"><span><b>{{ image.name }}</b><small>{{ image.width }} × {{ image.height }}</small></span><em>{{ String(i+1).padStart(2,'0') }}</em></button><button class="delete-image" :disabled="busy" :aria-label="'删除 '+image.name" :title="'删除 '+image.name" @click="requestRemoval(image)">×</button></div><p v-if="!images.length" class="empty-list">图片将在这里按顺序排列</p></div>
+        <div v-if="images.length" class="batch-image-actions">
+          <label><input type="checkbox" :checked="checkedImages.length===images.length" :indeterminate.prop="checkedImages.length>0 && checkedImages.length<images.length" :disabled="busy" @change="checkedImages=$event.target.checked ? images.map(item => item.id) : []">全选</label>
+          <button :disabled="busy || !checkedImages.length" @click="requestBatchRemoval">删除所选（{{ checkedImages.length }}）</button>
+        </div>
+        <div ref="imageList" class="image-list" aria-label="图片列表" tabindex="0"><div v-for="(image,i) in images" :key="image.id" class="image-row"><input v-model="checkedImages" type="checkbox" :value="image.id" :disabled="busy" :aria-label="'勾选 ' + image.name"><button :class="['image-item',{active:selected===image.id}]" :disabled="busy" :aria-pressed="selected===image.id" @click="selected=image.id"><img :src="url(image,true)" alt="" loading="lazy" decoding="async"><span><b>{{ image.name }}</b><small>{{ image.width }} × {{ image.height }}</small></span><em>{{ String(i+1).padStart(2,'0') }}</em></button><button class="delete-image" :disabled="busy" :aria-label="'删除 '+image.name" :title="'删除 '+image.name" @click="requestRemoval(image)">×</button></div><p v-if="!images.length" class="empty-list">图片将在这里按顺序排列</p></div>
         <p class="list-note">所有菜单共用此图片列表<br>选择图片后，可在右侧重命名和编辑</p>
       </aside>
       <main>
@@ -469,18 +517,19 @@ onUnmounted(() => { disposed = true; adjacentPreviews = []; window.removeEventLi
           <div v-if="current" class="picture" :style="{transform:`translate(${pan.x}px,${pan.y}px) scale(${zoom})`}"><img ref="photo" :src="url(current)" :alt="current.name" draggable="false" decoding="async"><div v-if="crop" class="crop-box" :style="cropStyle"></div></div>
           <div v-else class="placeholder"><div class="placeholder-icon">▧</div><h2>{{ menu.empty }}</h2><p>{{ menu.detail }}</p><small>导入后，可在此预览、重命名、旋转、裁剪和压缩</small></div>
         </div>
-        <section v-if="current?.contexts?.length && showContext" class="document-context" aria-label="文档参考描述">
-          <h2>文档参考描述</h2>
-          <p class="context-hint">点击描述填入名称，再确认保存。文字按文档结构关联，浮动图片请核对实际对应关系。</p>
+        <section v-if="current?.contexts?.length && showContext" class="document-context" :aria-label="current.contexts[0]?.page ? 'PDF 页面信息' : '文档参考描述'">
+          <h2>{{ current.contexts[0]?.page ? '页面信息' : '文档参考描述' }}</h2>
+          <p v-if="current.contexts[0]?.page" class="context-hint">这是 PDF 页面截图，可直接重命名、编辑或使用 AI 命名。</p>
+          <p v-else class="context-hint">点击描述填入名称，再确认保存。文字按文档结构关联，浮动图片请核对实际对应关系。</p>
           <article v-for="(context, occurrence) in current.contexts" :key="occurrence" class="context-occurrence">
-            <div class="context-source">{{ context.document }} · 第 {{ context.paragraph }} 段<span v-if="current.contexts.length > 1"> · 第 {{ occurrence + 1 }} 处引用</span></div>
+            <div class="context-source">{{ context.document }} · {{ context.page ? `第 ${context.page} 页` : `第 ${context.paragraph} 段` }}<span v-if="current.contexts.length > 1"> · 第 {{ occurrence + 1 }} 处引用</span></div>
             <template v-if="context.above.length"><h3>图片上方</h3><p v-for="(text, i) in context.above" :key="i" class="context-text">{{ text }}</p></template>
             <template v-if="context.inline_before || context.inline_after"><h3>图片同段文字</h3><p v-if="context.inline_before" class="context-text">前：{{ context.inline_before }}</p><p v-if="context.inline_after" class="context-text">后：{{ context.inline_after }}</p></template>
-            <div class="context-position">▧ 当前图片</div>
+            <div v-if="!context.page" class="context-position">▧ 当前图片</div>
             <template v-if="context.below.length"><h3>图片下方</h3><p v-for="(text, i) in context.below" :key="i" class="context-text">{{ text }}</p></template>
             <template v-if="context.alt_text.length"><h3>图片替代文字</h3><p v-for="(text, i) in context.alt_text" :key="i" class="context-text">{{ text }}</p></template>
             <div v-if="context.candidates.length" class="name-candidates"><h3>选择命名参考</h3><button v-for="(candidate,i) in context.candidates" :key="i" :disabled="busy" :title="candidate.text" @click="useDescription(candidate)"><small>{{ candidate.source }}<b v-if="candidate.is_caption"> · 疑似题注</b></small><span>{{ candidate.name }}</span><em>填入名称 ↗</em></button></div>
-            <p v-else class="context-hint">附近未找到可用文字，请手动命名。</p>
+            <p v-else-if="!context.page" class="context-hint">附近未找到可用文字，请手动命名。</p>
           </article>
         </section>
         </div>
@@ -509,13 +558,13 @@ onUnmounted(() => { disposed = true; adjacentPreviews = []; window.removeEventLi
       <p v-else-if="failed && message" role="alert">{{ message }}</p>
       <p v-else-if="pdfResult" role="status">已保存到「{{ pdfResult.folder }}」中的 {{ pdfResult.name }}（{{ pdfResult.pages }} 页）。</p>
     </main>
-    <footer>拾图 SHITU · 2.8.0 <span>让每一张图片，各得其名。</span></footer>
+    <footer>拾图 SHITU · 2.9.0 <span>让每一张图片，各得其名。</span></footer>
     <dialog ref="confirmationDialog" aria-labelledby="removal-title" class="removal-dialog" @cancel.prevent="cancelRemoval">
-      <h2 id="removal-title">{{ pendingRemoval?.id ? '删除这张图片？' : '清空工作区？' }}</h2>
-      <p>{{ pendingRemoval?.id ? `将从当前工作区删除“${pendingRemoval.name}”。` : `将清空当前工作区的 ${images.length} 张图片及其编辑结果，请先导出需要的内容。` }}</p>
+      <h2 id="removal-title">{{ pendingRemoval?.ids ? '删除选中的图片？' : pendingRemoval?.id ? '删除这张图片？' : '清空工作区？' }}</h2>
+      <p>{{ pendingRemoval?.ids ? `将从工作区删除选中的 ${pendingRemoval.ids.length} 张图片。` : pendingRemoval?.id ? `将从当前工作区删除“${pendingRemoval.name}”。` : `将清空当前工作区的 ${images.length} 张图片及其编辑结果，请先导出需要的内容。` }}</p>
       <p class="muted">源 Word 文档和导入前的本地文件不会被删除。</p>
       <p v-if="removalError" role="alert" class="removal-error">{{ removalError }}</p>
-      <div class="dialog-actions"><button :disabled="busy" autofocus @click="cancelRemoval">取消</button><button class="danger" :disabled="busy" @click="confirmRemoval">{{ busy ? '正在处理…' : pendingRemoval?.id ? '确认删除' : '确认清空' }}</button></div>
+      <div class="dialog-actions"><button :disabled="busy" autofocus @click="cancelRemoval">取消</button><button class="danger" :disabled="busy" @click="confirmRemoval">{{ busy ? '正在处理…' : (pendingRemoval?.id || pendingRemoval?.ids) ? '确认删除' : '确认清空' }}</button></div>
     </dialog>
     <dialog ref="certificateDialog" class="certificate-dialog" aria-labelledby="certificate-title" @cancel.prevent="closeCertificateDialog">
       <div class="certificate-heading"><div><h2 id="certificate-title">证书自动截图</h2><p class="muted">自定义字段 · 批量处理 · Windows 原生截图</p></div><button :disabled="busy" aria-label="关闭证书截图" @click="closeCertificateDialog">×</button></div>

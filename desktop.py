@@ -17,6 +17,29 @@ import webview
 from backend.app import create_app
 
 
+def check_pdf_screenshot(port, token):
+    """Verify the packaged PDF renderer end to end during --smoke-test."""
+    import json
+    import pymupdf
+    document = pymupdf.open()
+    page = document.new_page(width=72, height=72)
+    page.insert_text((10, 36), 'smoke')
+    pdf = document.tobytes()
+    document.close()
+    boundary = '----shitu-pdf-smoke'
+    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="smoke.pdf"\r\n'
+            'Content-Type: application/pdf\r\n\r\n').encode() + pdf + (
+            f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="pages"\r\n\r\n1\r\n'
+            f'--{boundary}\r\nContent-Disposition: form-data; name="dpi"\r\n\r\n150\r\n'
+            f'--{boundary}--\r\n').encode()
+    request = urllib.request.Request(
+        f'http://127.0.0.1:{port}/api/pdf/screenshot', data=body,
+        headers={'x-app-token': token, 'Content-Type': f'multipart/form-data; boundary={boundary}'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read())
+    assert payload['pages'] == 1 and len(payload['images']) == 1
+
+
 class DesktopBridge:
     def __init__(self, app):
         # pywebview recursively inspects public attributes during bridge injection.
@@ -182,6 +205,7 @@ def main():
             request = urllib.request.Request(f"http://127.0.0.1:{port}/api/images", headers={"x-app-token": token})
             with urllib.request.urlopen(request, timeout=10) as response:
                 assert response.read() == b'[]'
+            check_pdf_screenshot(port, token)
         finally:
             server.should_exit = True
             worker.join(timeout=10)
@@ -245,7 +269,7 @@ def main():
                     raise RuntimeError('Certificate screenshots did not reach the desktop image list')
                 if not (result and result["uiReady"] and result["desktopReady"] and result["imagesReady"]
                         and result["previewWidth"] > 0 and result["previewHeight"] > 0
-                        and result['menuCount'] == 4 and result['sidebarImports'] == 0
+                        and result['menuCount'] == 5 and result['sidebarImports'] == 0
                         and result['pageWidth'] <= result['viewportWidth'] + 1
                         and result["bridge"] == ["capture_certificate", "choose_certificate", "export_folder", "export_zip", "import_folder"]):
                     raise RuntimeError("Desktop UI/bridge readiness check failed")

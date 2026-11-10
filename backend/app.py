@@ -38,7 +38,7 @@ def create_app(token=None, ai_settings_path=None):
         yield
         workspace.close()
 
-    app = FastAPI(title="拾图 Shitu · Word 图片工作台", version="2.8.0", lifespan=lifespan)
+    app = FastAPI(title="拾图 Shitu · Word 图片工作台", version="2.9.0", lifespan=lifespan)
     app.state.workspace = workspace
     app.state.lock = lock
     from .certificate_batch import register_certificate_routes
@@ -137,6 +137,29 @@ def create_app(token=None, ai_settings_path=None):
             return merge_to_folder(files, name, choose_export_folder)
         finally:
             export_picker_lock.release()
+
+    @app.post('/api/pdf/screenshot')
+    def screenshot_pdf(file: UploadFile = File(...), pages: str = Form(''), dpi: int = Form(150)):
+        from .pdf_screenshot import render_pdf_pages
+        data = file.file.read(MAX_FILE + 1)
+        generation = workspace.root
+        added = []
+        try:
+            for name, context, raw in render_pdf_pages(data, file.filename or 'PDF 文档.pdf', pages, dpi):
+                with lock:
+                    if workspace.root != generation:
+                        raise ValueError('工作区已变化，请重新导入')
+                    added.append(workspace.add(raw, name, [context]))
+        except Exception as exc:
+            with lock:
+                for key in added:
+                    item = workspace.images.pop(key, None)
+                    if item:
+                        item['path'].unlink(missing_ok=True)
+            detail = str(exc) if isinstance(exc, ValueError) else '请检查 PDF 文件格式、大小和页面内容'
+            raise HTTPException(400, f'导入失败：{detail}') from exc
+        with lock:
+            return {'images': workspace.listing(), 'pages': len(added)}
 
     @app.post('/api/import/source-folder')
     def import_source_folder(request: Request):
@@ -243,6 +266,23 @@ def create_app(token=None, ai_settings_path=None):
         with lock:
             workspace.remove(key)
             return workspace.listing()
+
+    @app.post('/api/images/batch-delete')
+    def delete_selected(ids: list[str]):
+        if not ids:
+            raise ValueError('请选择要删除的图片')
+        with lock:
+            failed = []
+            removed = 0
+            for key in dict.fromkeys(ids):
+                if key not in workspace.images:
+                    continue
+                try:
+                    workspace.remove(key)
+                    removed += 1
+                except OSError:
+                    failed.append(key)
+            return {'images': workspace.listing(), 'removed': removed, 'failed': failed}
 
     dist = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "frontend" / "dist"
     if dist.exists():

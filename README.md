@@ -1,6 +1,6 @@
 # 拾图 Shitu
 
-本地图片与证书截图工作台，当前版本 **2.8.0**。前端使用 Vue 3，后端使用 FastAPI，桌面版由 pywebview 和 PyInstaller 提供。支持网页预览和 Windows 客户端分发，旧版 Tkinter 实现可通过 Git 历史查看。
+本地图片与证书截图工作台，当前版本 **2.9.0**。前端使用 Vue 3，后端使用 FastAPI，桌面版由 pywebview 和 PyInstaller 提供。支持网页预览和 Windows 客户端分发，旧版 Tkinter 实现可通过 Git 历史查看。
 
 ## 功能入口
 
@@ -9,6 +9,8 @@
 | Word 提图 | 按 Word 正文引用顺序提取图片，显示附近文字和命名参考；支持 `.docx` 与 `.doc` |
 | 本地图片 | 导入图片或文件夹，重命名、旋转、翻转、裁剪和压缩 |
 | 证书截图 | 批量添加证书，选择常用或自定义字段，生成真实 Windows 证书窗口截图 |
+| PDF 合并 | 多选 PDF、调整页序后合并保存 |
+| PDF 截图 | 按页把 PDF 渲染为 PNG 并加入图片工作区 |
 
 顶部菜单下方只显示对应操作；左侧是独立滚动的图片列表，右侧用于预览和编辑，右上方提供 AI 配置、导出和清空。图片名称旁提供「AI 生成名称」和「批量命名」。菜单共用图片工作区，切换时保留图片、名称草稿及编辑状态。
 
@@ -47,9 +49,17 @@
 
 在「PDF 合并」菜单中多选 PDF，可上下调整顺序并填写输出名称。点击「合并并保存」后，Windows 目录选择框默认定位到第一份 PDF 所在目录。同名时自动编号，原文件保留。
 
+## PDF 截图
+
+在「PDF 截图」菜单中选择 PDF，按需填写页码范围（留空为全部，支持 `1-5,8`）并选择 150 或 300 DPI，点击「导入页面」。每页渲染为一张 PNG，按 `文件名_p001.png` 命名并加入当前图片工作区，可继续重命名、编辑、AI 命名和导出。
+
+- 单文件不超过 50 MB，单次最多导入 200 页；图片工作区总量仍为 250 MB。
+- 加密 PDF 需先解除密码保护；页码越界、文件损坏或单页超过 5000 万像素会给出具体提示，失败时本批导入整体回滚，不影响已有图片。
+- 只渲染页面，不修改原始 PDF，也不提取文字或做 OCR。
+
 ## 使用客户端
 
-Windows 分发包为 `dist/Shitu-2.8.0-Windows-x64.zip`。解压整个文件夹后运行 **拾图 Shitu.exe**，请保留同目录的依赖文件，不要只复制 EXE。
+Windows 分发包为 `dist/Shitu-2.9.0-Windows-x64.zip`。解压整个文件夹后运行 **拾图 Shitu.exe**，请保留同目录的依赖文件，不要只复制 EXE。
 
 客户端不要求安装 Python 或 Node.js，需要 Windows WebView2 Runtime。程序默认窗口为 1440 × 960，最小窗口为 800 × 650。
 
@@ -142,14 +152,14 @@ python desktop.py
 脚本会准备图标、安装前端锁定依赖、运行前端测试、构建网页和客户端，再检查正常/小窗口下的图片列表，最后生成：
 
 ```text
-dist/2.8.0/Shitu/拾图 Shitu.exe
-dist/Shitu-2.8.0-Windows-x64.zip
+dist/2.9.0/Shitu/拾图 Shitu.exe
+dist/Shitu-2.9.0-Windows-x64.zip
 ```
 
 按版本输出目录，避免覆盖正在运行的旧版。已有前端构建资源时，也可仅执行：
 
 ```powershell
-python -m PyInstaller --noconfirm --distpath dist/2.8.0 packaging/desktop.spec
+python -m PyInstaller --noconfirm --distpath dist/2.9.0 packaging/desktop.spec
 ```
 
 图标资源位于 `assets/branding/`，Windows 文件属性包含产品名称和版本。客户端必须在目标操作系统上分别构建；当前发布和原生证书截图验证面向 Windows x64。签名、安装器等发布流程需另行配置。

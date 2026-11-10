@@ -30,6 +30,9 @@ h2 { font-size: 16px; margin: 0; }
 .section-title span { color: #88939e; font-size: 12px; }
 .image-list { flex: 1 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .image-row { display: flex; align-items: center; gap: 3px; margin: 4px 0; }
+.batch-image-actions { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 5px; font-size: 12px; }
+.batch-image-actions label { display: flex; align-items: center; gap: 4px; }
+.batch-image-actions button { padding: 5px 7px; font-size: 12px; }
 .image-item { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 0; border: 1px solid transparent; text-align: left; padding: 8px; }
 .image-item.active { background: #edf6f3; border-color: #b8d8ce; }
 .image-item img { width: 42px; height: 42px; flex-shrink: 0; object-fit: contain; background: #f1f3f5; border-radius: 4px; }
@@ -65,6 +68,10 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .pdf-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .pdf-actions label { display: flex; align-items: center; gap: 8px; width: min(560px, 100%); }
 .pdf-actions input { flex: 1; min-width: 0; }
+.pdf-range, .pdf-dpi { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #556; }
+.pdf-range input { width: 170px; }
+.pdf-file-name { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #87948d; }
+@media (max-width:1100px) { .pdf-file-name { display: none; } }
 .ai-name-suggestion { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: -2px 0 10px; font-size: 12px; color: #728291; overflow-wrap: anywhere; }
 .ai-name-suggestion b { color: #126c62; font-weight: 500; }
 .rename span { color: #82919d; }
